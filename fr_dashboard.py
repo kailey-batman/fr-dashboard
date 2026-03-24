@@ -163,10 +163,16 @@ def _fill_from_custom_fields(df: pd.DataFrame) -> pd.DataFrame:
     if "custom_fields" not in df.columns:
         return df
 
+    # Match by lowercase — handles "Product Area", "product area", "product_area", etc.
     target_cols = {
-        "Product Area": COLUMNS.get("product_area", "product_area"),
-        "Priority":     COLUMNS.get("priority", "priority"),
-        "Severity":     COLUMNS.get("severity", "severity"),
+        "product area":  COLUMNS.get("product_area", "product_area"),
+        "product_area":  COLUMNS.get("product_area", "product_area"),
+        "priority":      COLUMNS.get("priority", "priority"),
+        "severity":      COLUMNS.get("severity", "severity"),
+        "skill set":     "skill_set",
+        "skill_set":     "skill_set",
+        "technical area": "technical_area",
+        "technical_area": "technical_area",
     }
 
     for idx, row in df.iterrows():
@@ -180,13 +186,14 @@ def _fill_from_custom_fields(df: pd.DataFrame) -> pd.DataFrame:
             for item in cf:
                 if not isinstance(item, dict):
                     continue
-                field_name = item.get("name", "")
-                value = str(item.get("value", "")).strip()
-                if field_name in target_cols and value:
+                # Support both {"name":..., "value":...} and {"field_name":..., "value":...}
+                field_name = (item.get("name") or item.get("field_name") or "").lower().strip()
+                value = str(item.get("value") or item.get("value_name") or "").strip()
+                if field_name in target_cols and value and value != "nan":
                     col = target_cols[field_name]
                     if col in df.columns:
                         current = str(df.at[idx, col]).strip()
-                        if not current or current == "nan":
+                        if not current or current in ("nan", "None", ""):
                             df.at[idx, col] = value
         except (json.JSONDecodeError, TypeError):
             continue
@@ -532,6 +539,17 @@ def main():
             st.rerun()
         st.markdown("---")
         st.caption(f"Last loaded: {datetime.now().strftime('%H:%M:%S')}")
+
+        # Debug: show raw custom_fields sample
+        with st.expander("🔧 Debug", expanded=False):
+            if not df.empty and "custom_fields" in df.columns:
+                sample = df["custom_fields"].dropna().astype(str)
+                sample = sample[sample.str.strip().str.len() > 5]
+                if not sample.empty:
+                    st.text("First non-empty custom_fields value:")
+                    st.code(sample.iloc[0][:500])
+                else:
+                    st.text("custom_fields column is empty for all rows.")
 
     # ── Load data ────────────────────────────────────────────
     with st.spinner("Loading feature requests…"):
