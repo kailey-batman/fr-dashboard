@@ -580,17 +580,32 @@ def main():
     with st.spinner("Loading feature requests…"):
         df = load_feature_requests()
 
-    # ── Load contacts + auto-refresh if extraction running ───
+    # ── Load contacts + auto-start extraction if needed ─────
     contacts = load_contacts()
     progress = load_contacts_progress()
+    ai = get_anthropic_client()
+
+    if not df.empty and ai:
+        id_col_name = COLUMNS.get("id", "id")
+        unanalyzed = [
+            str(row.get(id_col_name, ""))
+            for _, row in df.iterrows()
+            if str(row.get(id_col_name, "")) not in contacts
+        ]
+        if unanalyzed and not progress.get("running"):
+            start_contact_extraction(df, ai)
+            progress = {"running": True, "done": 0, "total": len(df)}
+
     if progress.get("running"):
-        st.markdown(
-            '<meta http-equiv="refresh" content="4">',
-            unsafe_allow_html=True,
-        )
+        st.markdown('<meta http-equiv="refresh" content="4">', unsafe_allow_html=True)
         done  = progress.get("done", 0)
         total = progress.get("total", 1)
-        st.info(f"Extracting contacts… {done}/{total} tickets processed. Page auto-refreshes.")
+        st.markdown(f"""
+        <div class="progress-banner">
+            <span class="progress-text">Analyzing tickets… {done}/{total} processed — filtering to customer requests</span>
+        </div>
+        """, unsafe_allow_html=True)
+        st.progress(done / total if total > 0 else 0)
 
     # Merge contacts into df and filter to customer tickets
     if not df.empty:
@@ -667,20 +682,14 @@ def main():
 
         st.markdown("---")
 
-        # ── Contact extraction controls ───────────────────────
+        # ── Contact extraction status ─────────────────────────
         contacts_extracted = sum(1 for v in contacts.values() if v.get("name"))
-        cex1, cex2 = st.columns([4, 1])
-        with cex1:
-            if progress.get("running"):
-                st.caption(f"Extracting contacts: {progress.get('done', 0)}/{progress.get('total', 0)}")
-            else:
-                st.caption(f"Contact extraction: {contacts_extracted} contacts found across {len(contacts)} tickets analyzed.")
-        with cex2:
-            ai = get_anthropic_client()
-            if not progress.get("running") and ai:
-                if st.button("Extract Contacts", use_container_width=True):
-                    start_contact_extraction(df, ai)
-                    st.rerun()
+        analyzed = len(contacts)
+        if analyzed < len(df):
+            remaining = len(df) - analyzed
+            st.caption(f"Analysis running — {analyzed}/{len(df)} tickets reviewed · {contacts_extracted} contacts found · {remaining} remaining")
+        else:
+            st.caption(f"Analysis complete — {analyzed} tickets reviewed · {contacts_extracted} contacts found")
 
         st.markdown("---")
 
