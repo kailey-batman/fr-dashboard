@@ -159,44 +159,80 @@ def get_gsheet_client():
 # as top-level columns.  This fills them in when empty.
 # ============================================================
 
+def _parse_custom_fields_text(cf_raw: str) -> dict:
+    """
+    Parse Shortcut's custom_fields text format: 'Key=Value\nKey2=Value2'
+    Returns a dict of {lowercase_key: value}.
+    Falls back to JSON parsing if the string looks like JSON.
+    """
+    cf_raw = cf_raw.strip()
+    if not cf_raw or cf_raw in ("nan", "[]", "{}"):
+        return {}
+
+    # Try JSON first
+    if cf_raw.startswith("[") or cf_raw.startswith("{"):
+        try:
+            cf = json.loads(cf_raw)
+            result = {}
+            items = cf if isinstance(cf, list) else [cf]
+            for item in items:
+                if isinstance(item, dict):
+                    k = (item.get("name") or item.get("field_name") or "").lower().strip()
+                    v = str(item.get("value") or item.get("value_name") or "").strip()
+                    if k and v and v != "nan":
+                        result[k] = v
+            return result
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+    # Plain text: split on newlines or semicolons, then split each on first "="
+    result = {}
+    for part in cf_raw.replace(";", "\n").split("\n"):
+        part = part.strip()
+        if "=" not in part:
+            continue
+        key, _, val = part.partition("=")
+        key = key.strip().lower()
+        val = val.strip()
+        if key and val and val != "nan":
+            result[key] = val
+    return result
+
+
 def _fill_from_custom_fields(df: pd.DataFrame) -> pd.DataFrame:
     if "custom_fields" not in df.columns:
         return df
 
-    # Match by lowercase — handles "Product Area", "product area", "product_area", etc.
-    target_cols = {
-        "product area":  COLUMNS.get("product_area", "product_area"),
-        "product_area":  COLUMNS.get("product_area", "product_area"),
-        "priority":      COLUMNS.get("priority", "priority"),
-        "severity":      COLUMNS.get("severity", "severity"),
-        "skill set":     "skill_set",
-        "skill_set":     "skill_set",
-        "technical area": "technical_area",
-        "technical_area": "technical_area",
-    }
+    # Map: substring to match in the key → target df column
+    # Uses "in" matching so "user priority" matches "feedback: user priority"
+    keyword_to_col = [
+        ("product area",   COLUMNS.get("product_area", "product_area")),
+        ("product_area",   COLUMNS.get("product_area", "product_area")),
+        ("priority",       COLUMNS.get("priority", "priority")),
+        ("severity",       COLUMNS.get("severity", "severity")),
+        ("skill set",      "skill_set"),
+        ("skill_set",      "skill_set"),
+        ("technical area", "technical_area"),
+        ("technical_area", "technical_area"),
+    ]
 
     for idx, row in df.iterrows():
-        cf_raw = str(row.get("custom_fields", "")).strip()
-        if not cf_raw or cf_raw in ("nan", "[]", "{}"):
+        cf_raw = str(row.get("custom_fields", ""))
+        parsed = _parse_custom_fields_text(cf_raw)
+        if not parsed:
             continue
-        try:
-            cf = json.loads(cf_raw)
-            if not isinstance(cf, list):
+
+        for keyword, col in keyword_to_col:
+            if col not in df.columns:
                 continue
-            for item in cf:
-                if not isinstance(item, dict):
-                    continue
-                # Support both {"name":..., "value":...} and {"field_name":..., "value":...}
-                field_name = (item.get("name") or item.get("field_name") or "").lower().strip()
-                value = str(item.get("value") or item.get("value_name") or "").strip()
-                if field_name in target_cols and value and value != "nan":
-                    col = target_cols[field_name]
-                    if col in df.columns:
-                        current = str(df.at[idx, col]).strip()
-                        if not current or current in ("nan", "None", ""):
-                            df.at[idx, col] = value
-        except (json.JSONDecodeError, TypeError):
-            continue
+            current = str(df.at[idx, col]).strip()
+            if current and current not in ("nan", "None", ""):
+                continue  # already populated
+            # Find a key that contains the keyword
+            for k, v in parsed.items():
+                if keyword in k:
+                    df.at[idx, col] = v
+                    break
 
     return df
 
