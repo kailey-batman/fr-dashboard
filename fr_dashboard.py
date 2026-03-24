@@ -107,6 +107,19 @@ COLUMNS = {
 # Exact value in the "type" column for feature requests.
 FEATURE_REQUEST_TYPE = "feature"
 
+# Email domain for internal team members — tickets submitted by this domain
+# with no customer keywords in the description are pre-filtered as internal.
+INTERNAL_DOMAIN = "fieldguide.io"
+
+# Keywords that suggest a customer is mentioned in the description.
+CUSTOMER_KEYWORDS = [
+    "customer", "client", "account", "partner", "user", "they ", "their team",
+    "company", "org ", "organization", "enterprise", "prospect", "vendor",
+]
+
+# How many tickets to send Claude per batch during analysis.
+ANALYSIS_BATCH_SIZE = 20
+
 # Columns shown in the main data table (logical key names from COLUMNS dict above)
 DISPLAY_KEYS = ["id", "timestamp", "title", "submitter", "contact", "product_area", "priority", "severity", "status", "labels", "epic"]
 
@@ -332,39 +345,73 @@ def load_contacts_progress() -> dict:
     return {"done": 0, "total": 0, "running": False}
 
 
-def _extract_contact_api(ai: anthropic.Anthropic, title: str, description: str, requester: str) -> dict:
-    prompt = f"""You are reading a Shortcut ticket. Answer two things:
+def _is_internal_heuristic(requester: str, description: str) -> bool:
+    """Fast pre-filter: internal domain requester with no customer keywords = internal."""
+    if INTERNAL_DOMAIN and INTERNAL_DOMAIN in requester.lower():
+        desc_lower = description.lower()
+        if not any(kw in desc_lower for kw in CUSTOMER_KEYWORDS):
+            return True
+    return False
 
-1. Is this ticket customer-submitted or customer-driven? A customer ticket mentions a specific customer, client, company, or end-user requesting the feature — even if an internal engineer filed it on their behalf. An internal ticket is purely an engineering initiative with no customer mention.
 
-2. Who is the named contact person (if any) — someone who should be notified about updates? Look for explicit name mentions like "Britni from Wipfli suggested this." The contact may differ from the requester field.
+def _analyze_batch(ai: anthropic.Anthropic, batch: list[dict]) -> list[dict]:
+    """Send a batch of tickets to Claude and get back is_customer + contact for each."""
+    ticket_lines = []
+    for t in batch:
+        ticket_lines.append(
+            f"[{t['id']}] Title: {t['title']}\n"
+            f"Requester: {t['requester']}\n"
+            f"Description: {t['description'][:600]}"
+        )
 
-Ticket title: {title}
-Requester (system field): {requester}
-Description:
-{description[:1500]}
+    prompt = f"""You are reviewing Shortcut feature request tickets. For each ticket determine:
+1. Is it customer-driven? (A real customer/client/account requested it, even if filed internally on their behalf.)
+2. Is there a named contact person to notify? (e.g. "Britni from Wipfli suggested this")
 
-Respond with JSON only — no other text:
-{{
-  "is_customer_ticket": true or false,
-  "name": "First Last or null",
-  "company": "Company name or null",
-  "role": "their role or null"
-}}"""
+Tickets:
+
+{"=" * 60}
+{"=" * 60 + chr(10) + "=" * 60 + chr(10)}.join(ticket_lines)
+
+Respond with a JSON array — one object per ticket, in the same order:
+[
+  {{
+    "id": "<ticket id>",
+    "is_customer_ticket": true or false,
+    "name": "First Last or null",
+    "company": "Company or null",
+    "role": "role or null"
+  }}
+]
+No other text."""
+
+    # Build the prompt properly
+    tickets_text = ("\n" + "=" * 60 + "\n").join(ticket_lines)
+    prompt = f"""You are reviewing Shortcut feature request tickets. For each ticket determine:
+1. Is it customer-driven? (A real customer/client/account requested it, even if filed internally on their behalf.)
+2. Is there a named contact person to notify? (e.g. "Britni from Wipfli suggested this")
+
+Tickets:
+
+{tickets_text}
+
+Respond with a JSON array — one object per ticket, in the same order:
+[{{"id": "<id>", "is_customer_ticket": true/false, "name": "or null", "company": "or null", "role": "or null"}}]
+No other text."""
 
     try:
         resp = ai.messages.create(
             model="claude-haiku-4-5-20251001",
-            max_tokens=200,
+            max_tokens=ANALYSIS_BATCH_SIZE * 80,
             messages=[{"role": "user", "content": prompt}],
         )
         text = resp.content[0].text.strip()
         if text.startswith("```"):
-            text = "\n".join(text.split("\n")[1:])
-            text = text.rstrip("`").strip()
+            text = "\n".join(text.split("\n")[1:]).rstrip("`").strip()
         return json.loads(text)
     except Exception:
-        return {"is_customer_ticket": None, "name": None, "company": None, "role": None}
+        # On failure mark all as customer tickets (safe default — don't hide anything)
+        return [{"id": t["id"], "is_customer_ticket": True, "name": None, "company": None, "role": None} for t in batch]
 
 
 def _run_contact_extraction_thread(df: pd.DataFrame, ai: anthropic.Anthropic):
@@ -373,23 +420,44 @@ def _run_contact_extraction_thread(df: pd.DataFrame, ai: anthropic.Anthropic):
     title_col = COLUMNS.get("title", "name")
     desc_col  = COLUMNS.get("description", "description")
     req_col   = COLUMNS.get("submitter", "requester")
-    total = len(df)
 
-    for i, (_, row) in enumerate(df.iterrows()):
-        ticket_id = str(row.get(id_col, f"row_{i}"))
+    # Stage 1: instant heuristic pre-filter
+    to_analyze = []
+    for _, row in df.iterrows():
+        ticket_id   = str(row.get(id_col, ""))
         if ticket_id in contacts:
             continue
-
         title       = str(row.get(title_col, ""))
         description = str(row.get(desc_col, ""))
         requester   = str(row.get(req_col, ""))
 
-        contacts[ticket_id] = _extract_contact_api(ai, title, description, requester)
+        if _is_internal_heuristic(requester, description):
+            contacts[ticket_id] = {"is_customer_ticket": False, "name": None, "company": None, "role": None}
+        else:
+            to_analyze.append({"id": ticket_id, "title": title, "description": description, "requester": requester})
 
-        if i % 5 == 0 or i == total - 1:
-            save_contacts(contacts)
-            with open(CONTACTS_PROGRESS_FILE, "w") as f:
-                json.dump({"done": i + 1, "total": total, "running": True}, f)
+    # Save heuristic results immediately so the UI updates fast
+    save_contacts(contacts)
+    total = len(to_analyze)
+
+    # Stage 2: batch AI analysis for borderline tickets
+    for batch_start in range(0, total, ANALYSIS_BATCH_SIZE):
+        batch = to_analyze[batch_start: batch_start + ANALYSIS_BATCH_SIZE]
+        results = _analyze_batch(ai, batch)
+
+        for r in results:
+            tid = str(r.get("id", ""))
+            contacts[tid] = {
+                "is_customer_ticket": r.get("is_customer_ticket", True),
+                "name":    r.get("name"),
+                "company": r.get("company"),
+                "role":    r.get("role"),
+            }
+
+        done = batch_start + len(batch)
+        save_contacts(contacts)
+        with open(CONTACTS_PROGRESS_FILE, "w") as f:
+            json.dump({"done": done, "total": total, "running": True}, f)
 
     save_contacts(contacts)
     with open(CONTACTS_PROGRESS_FILE, "w") as f:
