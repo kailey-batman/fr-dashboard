@@ -5,6 +5,7 @@ import gspread
 from google.oauth2.service_account import Credentials
 import json
 import os
+import base64
 import threading
 from datetime import datetime
 import io
@@ -14,9 +15,65 @@ import io
 # ============================================================
 st.set_page_config(
     page_title="Feature Request Dashboard",
+    page_icon="logo.svg",
     layout="wide",
     initial_sidebar_state="collapsed",
 )
+
+# ── Custom CSS (matches L2 dashboard styling) ────────────────
+st.markdown("""
+<style>
+    .stApp { background-color: #2D333B; }
+
+    .header-container {
+        display: flex; align-items: center; gap: 16px; padding: 0.5rem 0 0.5rem 0;
+    }
+    .header-container img { width: 48px; height: 48px; }
+    .header-container h1 { color: #00E676; margin: 0; font-size: 2rem; }
+    .header-subtitle { color: #9E9E9E; font-size: 0.95rem; margin-top: -4px; padding-bottom: 1rem; }
+
+    [data-testid="stMetric"] {
+        background-color: #373E47; border: 1px solid #444C56; border-radius: 10px; padding: 16px;
+    }
+    [data-testid="stMetricLabel"] { color: #9E9E9E !important; }
+    [data-testid="stMetricValue"] { color: #E0E0E0 !important; }
+    [data-testid="stMetricDelta"] { color: #00E676 !important; }
+
+    [data-testid="stSidebar"] { background-color: #333A44; border-right: 1px solid #444C56; }
+    [data-testid="stSidebar"] .stMarkdown h2 { color: #00E676; }
+
+    .stTabs [data-baseweb="tab"] { color: #9E9E9E; }
+    .stTabs [aria-selected="true"] { color: #00E676 !important; border-bottom-color: #00E676 !important; }
+
+    .stButton > button[kind="primary"] {
+        background-color: #00E676; color: #2D333B; border: none; font-weight: 600;
+    }
+    .stButton > button[kind="primary"]:hover { background-color: #00C853; color: #2D333B; }
+
+    .stDownloadButton > button {
+        background-color: #373E47; color: #00E676; border: 1px solid #00E676;
+    }
+    .stDownloadButton > button:hover { background-color: #00E676; color: #2D333B; }
+
+    .streamlit-expanderHeader { color: #E0E0E0; background-color: #373E47; }
+    hr { border-color: #444C56; }
+    [data-baseweb="select"] { background-color: #373E47; }
+    .stDataFrame { border: 1px solid #444C56; border-radius: 8px; overflow-x: auto !important; }
+
+    .progress-banner {
+        background-color: #1A2F1A; border: 1px solid #00E676; border-radius: 8px;
+        padding: 12px 20px; margin-bottom: 16px;
+    }
+    .progress-banner .progress-text { color: #00E676; font-weight: 600; }
+
+    .cat-stat-card {
+        background-color: #373E47; border: 1px solid #444C56; border-radius: 8px;
+        padding: 12px 16px; margin-bottom: 8px;
+    }
+    .cat-stat-card .cat-name { color: #00E676; font-weight: 600; font-size: 0.9rem; }
+    .cat-stat-card .cat-detail { color: #9E9E9E; font-size: 0.8rem; }
+</style>
+""", unsafe_allow_html=True)
 
 # ============================================================
 # CONFIGURATION — Update these to match your Google Sheet
@@ -446,19 +503,33 @@ def resolve_col(key: str, df: pd.DataFrame):
 # ============================================================
 
 def main():
+    # ── Header ───────────────────────────────────────────────
+    app_dir = os.path.dirname(os.path.abspath(__file__))
+    logo_path = os.path.join(app_dir, "logo.svg")
+    if os.path.exists(logo_path):
+        with open(logo_path, "r") as f:
+            logo_svg = f.read()
+        logo_b64 = base64.b64encode(logo_svg.encode()).decode()
+        st.markdown(f"""
+        <div class="header-container">
+            <img src="data:image/svg+xml;base64,{logo_b64}" />
+            <h1>Feature Request Dashboard</h1>
+        </div>
+        """, unsafe_allow_html=True)
+    else:
+        st.markdown('<h1 style="color:#00E676;">Feature Request Dashboard</h1>', unsafe_allow_html=True)
+
+    st.markdown('<div class="header-subtitle">Customer feature requests from Shortcut · NPI impact analysis</div>', unsafe_allow_html=True)
+
     # ── Sidebar ─────────────────────────────────────────────
     with st.sidebar:
-        try:
-            st.image("logo.svg", width=160)
-        except Exception:
-            st.markdown("## FR Dashboard")
-
+        if os.path.exists(logo_path):
+            st.image(logo_path, width=60)
         st.markdown("---")
         st.markdown("### Data")
         if st.button("🔄 Refresh Data", use_container_width=True):
             st.cache_data.clear()
             st.rerun()
-
         st.markdown("---")
         st.caption(f"Last loaded: {datetime.now().strftime('%H:%M:%S')}")
 
@@ -503,39 +574,39 @@ def main():
             st.warning("No feature request tickets found. Check your sheet ID, tab name, and column configuration.")
             st.stop()
 
-        st.subheader(f"Feature Requests — {len(df):,} total")
+        st.markdown(f'<div style="color:#9E9E9E;font-size:0.9rem;margin-bottom:12px;">Showing {len(df):,} open feature requests from 2025</div>', unsafe_allow_html=True)
 
-        # ── Metrics row ──────────────────────────────────────
-        m1, m2, m3, m4 = st.columns(4)
-
-        with m1:
-            st.metric("Total Requests", f"{len(df):,}")
+        def metric_card(label, value, sub=None):
+            sub_html = f'<div style="color:#9E9E9E;font-size:0.78rem;margin-top:4px;">{sub}</div>' if sub else ""
+            return f"""
+            <div style="background-color:#373E47;border:1px solid #444C56;border-radius:10px;
+                        padding:16px 20px;min-height:100px;display:flex;flex-direction:column;justify-content:space-between;">
+                <div style="color:#9E9E9E;font-size:0.85rem;font-weight:700;">{label}</div>
+                <div style="color:#E0E0E0;font-size:2rem;font-weight:700;line-height:1.1;">{value}</div>
+                {sub_html}
+            </div>"""
 
         priority_col = resolve_col("priority", df)
+        status_col   = resolve_col("status", df)
+        area_col     = resolve_col("product_area", df)
+
+        high = df[priority_col].astype(str).str.lower().isin(["high", "critical"]).sum() if priority_col else "—"
+        open_count = (~df[status_col].astype(str).str.lower().isin(
+            ["completed", "done", "cancelled", "canceled", "archived"]
+        )).sum() if status_col else "—"
+        area_count = df[area_col].nunique() if area_col else "—"
+        contacts_found = sum(1 for v in contacts.values() if v.get("name"))
+
+        m1, m2, m3, m4 = st.columns(4)
+        with m1:
+            st.markdown(metric_card("Total Requests", f"{len(df):,}"), unsafe_allow_html=True)
         with m2:
-            if priority_col:
-                high = df[priority_col].astype(str).str.lower().isin(["high", "critical"]).sum()
-                st.metric("High Priority", high)
-            else:
-                st.metric("High Priority", "—")
-
-        status_col = resolve_col("status", df)
+            pct = f"{int(high)/len(df)*100:.0f}% of total" if isinstance(high, (int, float)) and len(df) > 0 else ""
+            st.markdown(metric_card("High Priority", high, sub=pct), unsafe_allow_html=True)
         with m3:
-            if status_col:
-                open_count = (~df[status_col].astype(str).str.lower().isin(
-                    ["completed", "done", "cancelled", "canceled", "archived"]
-                )).sum()
-                st.metric("Open", open_count)
-            else:
-                st.metric("Open", "—")
-
-        area_col = resolve_col("product_area", df)
+            st.markdown(metric_card("Open", open_count), unsafe_allow_html=True)
         with m4:
-            if area_col:
-                st.metric("Product Areas", df[area_col].nunique())
-            else:
-                sub_col = resolve_col("submitter", df)
-                st.metric("Submitters", df[sub_col].nunique() if sub_col else "—")
+            st.markdown(metric_card("Product Areas", area_count, sub=f"{contacts_found} contacts extracted"), unsafe_allow_html=True)
 
         st.markdown("---")
 
