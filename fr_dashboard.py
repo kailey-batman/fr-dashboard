@@ -540,17 +540,6 @@ def main():
         st.markdown("---")
         st.caption(f"Last loaded: {datetime.now().strftime('%H:%M:%S')}")
 
-        # Debug: show raw custom_fields sample
-        with st.expander("🔧 Debug", expanded=False):
-            if not df.empty and "custom_fields" in df.columns:
-                sample = df["custom_fields"].dropna().astype(str)
-                sample = sample[sample.str.strip().str.len() > 5]
-                if not sample.empty:
-                    st.text("First non-empty custom_fields value:")
-                    st.code(sample.iloc[0][:500])
-                else:
-                    st.text("custom_fields column is empty for all rows.")
-
     # ── Load data ────────────────────────────────────────────
     with st.spinner("Loading feature requests…"):
         df = load_feature_requests()
@@ -580,6 +569,20 @@ def main():
                     return False  # not yet analyzed — keep it
                 return c.get("is_customer_ticket") is False
             df = df[~df.apply(_is_not_customer, axis=1)]
+
+    # ── Debug expander (sidebar, safe to render after df loaded) ─
+    with st.sidebar:
+        with st.expander("🔧 Debug", expanded=False):
+            if not df.empty and "custom_fields" in df.columns:
+                sample = df["custom_fields"].dropna().astype(str)
+                sample = sample[sample.str.strip().str.len() > 5]
+                if not sample.empty:
+                    st.text("First non-empty custom_fields:")
+                    st.code(sample.iloc[0][:500])
+                else:
+                    st.text("custom_fields is empty for all rows.")
+            elif df.empty:
+                st.text("No data loaded.")
 
     # ── Tabs ─────────────────────────────────────────────────
     tab1, tab2, tab3 = st.tabs(["📋 Feature Requests", "💬 NPI Chatbot", "📊 Google Sheet"])
