@@ -117,10 +117,15 @@ def load_feature_requests() -> pd.DataFrame:
                 == FEATURE_REQUEST_TYPE.lower()
             ]
 
-        # Parse timestamp
+        # Exclude completed tickets
+        if "is_completed" in df.columns:
+            df = df[df["is_completed"].astype(str).str.strip().str.lower() != "true"]
+
+        # Parse timestamp and filter to 2025+
         ts_col = COLUMNS.get("timestamp", "")
         if ts_col and ts_col in df.columns:
             df[ts_col] = pd.to_datetime(df[ts_col], errors="coerce")
+            df = df[df[ts_col] >= "2025-01-01"]
 
         return df.reset_index(drop=True)
 
