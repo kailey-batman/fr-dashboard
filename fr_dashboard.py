@@ -5,6 +5,7 @@ import gspread
 from google.oauth2.service_account import Credentials
 import json
 import os
+import threading
 from datetime import datetime
 import io
 
@@ -47,15 +48,19 @@ COLUMNS = {
 }
 
 # Exact value in the "type" column for feature requests.
-# In Shortcut this is typically lowercase "feature" — confirm against your sheet.
-# Set to None to skip type-filtering and show all rows.
 FEATURE_REQUEST_TYPE = "feature"
 
 # Columns shown in the main data table (logical key names from COLUMNS dict above)
-DISPLAY_KEYS = ["id", "timestamp", "title", "submitter", "product_area", "priority", "severity", "status", "labels", "epic"]
+DISPLAY_KEYS = ["id", "timestamp", "title", "submitter", "contact", "product_area", "priority", "severity", "status", "labels", "epic"]
 
-# Max tickets sent to the chatbot as context (to stay well inside the context window)
+# Max tickets sent to the chatbot as context
 CHATBOT_MAX_TICKETS = 500
+
+# File used to persist extracted contacts across redeploys
+CONTACTS_FILE = "contacts.json"
+CONTACTS_PROGRESS_FILE = "contacts_progress.json"
+
+_contacts_lock = threading.Lock()
 
 # ============================================================
 # GOOGLE SHEETS AUTH
@@ -70,13 +75,11 @@ SCOPES = [
 @st.cache_resource
 def get_gsheet_client():
     """Return an authenticated gspread client, or None on failure."""
-    # 1) Railway / Docker env var
     sa_json = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON")
     if sa_json:
         creds = Credentials.from_service_account_info(json.loads(sa_json), scopes=SCOPES)
         return gspread.authorize(creds)
 
-    # 2) Streamlit secrets
     try:
         creds = Credentials.from_service_account_info(
             dict(st.secrets["gcp_service_account"]), scopes=SCOPES
@@ -85,7 +88,6 @@ def get_gsheet_client():
     except Exception:
         pass
 
-    # 3) Local file
     if os.path.exists("service_account.json"):
         creds = Credentials.from_service_account_file("service_account.json", scopes=SCOPES)
         return gspread.authorize(creds)
@@ -93,9 +95,55 @@ def get_gsheet_client():
     return None
 
 
+# ============================================================
+# CUSTOM FIELDS PARSING
+# Shortcut sometimes stores product_area / priority / severity
+# inside a JSON array in the custom_fields column rather than
+# as top-level columns.  This fills them in when empty.
+# ============================================================
+
+def _fill_from_custom_fields(df: pd.DataFrame) -> pd.DataFrame:
+    if "custom_fields" not in df.columns:
+        return df
+
+    target_cols = {
+        "Product Area": COLUMNS.get("product_area", "product_area"),
+        "Priority":     COLUMNS.get("priority", "priority"),
+        "Severity":     COLUMNS.get("severity", "severity"),
+    }
+
+    for idx, row in df.iterrows():
+        cf_raw = str(row.get("custom_fields", "")).strip()
+        if not cf_raw or cf_raw in ("nan", "[]", "{}"):
+            continue
+        try:
+            cf = json.loads(cf_raw)
+            if not isinstance(cf, list):
+                continue
+            for item in cf:
+                if not isinstance(item, dict):
+                    continue
+                field_name = item.get("name", "")
+                value = str(item.get("value", "")).strip()
+                if field_name in target_cols and value:
+                    col = target_cols[field_name]
+                    if col in df.columns:
+                        current = str(df.at[idx, col]).strip()
+                        if not current or current == "nan":
+                            df.at[idx, col] = value
+        except (json.JSONDecodeError, TypeError):
+            continue
+
+    return df
+
+
+# ============================================================
+# DATA LOAD
+# ============================================================
+
 @st.cache_data(ttl=300)
 def load_feature_requests() -> pd.DataFrame:
-    """Pull the main sheet and return only feature-request rows."""
+    """Pull the main sheet and return only open feature-request rows from 2025+."""
     client = get_gsheet_client()
     if client is None:
         st.error("❌ Google Sheets not configured. Set GOOGLE_SERVICE_ACCOUNT_JSON env var.")
@@ -127,6 +175,9 @@ def load_feature_requests() -> pd.DataFrame:
             df[ts_col] = pd.to_datetime(df[ts_col], errors="coerce")
             df = df[df[ts_col] >= "2025-01-01"]
 
+        # Fill product_area / priority / severity from custom_fields if empty
+        df = _fill_from_custom_fields(df)
+
         return df.reset_index(drop=True)
 
     except Exception as e:
@@ -137,7 +188,6 @@ def load_feature_requests() -> pd.DataFrame:
 # ============================================================
 # ANTHROPIC CLIENT
 # ============================================================
-
 
 @st.cache_resource
 def get_anthropic_client():
@@ -153,12 +203,131 @@ def get_anthropic_client():
 
 
 # ============================================================
+# CONTACT EXTRACTION
+# ============================================================
+
+def load_contacts() -> dict:
+    if os.path.exists(CONTACTS_FILE):
+        try:
+            with open(CONTACTS_FILE, "r") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {}
+
+
+def save_contacts(contacts: dict):
+    with _contacts_lock:
+        with open(CONTACTS_FILE, "w") as f:
+            json.dump(contacts, f)
+
+
+def load_contacts_progress() -> dict:
+    if os.path.exists(CONTACTS_PROGRESS_FILE):
+        try:
+            with open(CONTACTS_PROGRESS_FILE, "r") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {"done": 0, "total": 0, "running": False}
+
+
+def _extract_contact_api(ai: anthropic.Anthropic, title: str, description: str, requester: str) -> dict:
+    prompt = f"""You are reading a Shortcut ticket. Answer two things:
+
+1. Is this ticket customer-submitted or customer-driven? A customer ticket mentions a specific customer, client, company, or end-user requesting the feature — even if an internal engineer filed it on their behalf. An internal ticket is purely an engineering initiative with no customer mention.
+
+2. Who is the named contact person (if any) — someone who should be notified about updates? Look for explicit name mentions like "Britni from Wipfli suggested this." The contact may differ from the requester field.
+
+Ticket title: {title}
+Requester (system field): {requester}
+Description:
+{description[:1500]}
+
+Respond with JSON only — no other text:
+{{
+  "is_customer_ticket": true or false,
+  "name": "First Last or null",
+  "company": "Company name or null",
+  "role": "their role or null"
+}}"""
+
+    try:
+        resp = ai.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=200,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        text = resp.content[0].text.strip()
+        if text.startswith("```"):
+            text = "\n".join(text.split("\n")[1:])
+            text = text.rstrip("`").strip()
+        return json.loads(text)
+    except Exception:
+        return {"is_customer_ticket": None, "name": None, "company": None, "role": None}
+
+
+def _run_contact_extraction_thread(df: pd.DataFrame, ai: anthropic.Anthropic):
+    contacts = load_contacts()
+    id_col    = COLUMNS.get("id", "id")
+    title_col = COLUMNS.get("title", "name")
+    desc_col  = COLUMNS.get("description", "description")
+    req_col   = COLUMNS.get("submitter", "requester")
+    total = len(df)
+
+    for i, (_, row) in enumerate(df.iterrows()):
+        ticket_id = str(row.get(id_col, f"row_{i}"))
+        if ticket_id in contacts:
+            continue
+
+        title       = str(row.get(title_col, ""))
+        description = str(row.get(desc_col, ""))
+        requester   = str(row.get(req_col, ""))
+
+        contacts[ticket_id] = _extract_contact_api(ai, title, description, requester)
+
+        if i % 5 == 0 or i == total - 1:
+            save_contacts(contacts)
+            with open(CONTACTS_PROGRESS_FILE, "w") as f:
+                json.dump({"done": i + 1, "total": total, "running": True}, f)
+
+    save_contacts(contacts)
+    with open(CONTACTS_PROGRESS_FILE, "w") as f:
+        json.dump({"done": total, "total": total, "running": False}, f)
+
+
+def start_contact_extraction(df: pd.DataFrame, ai: anthropic.Anthropic):
+    t = threading.Thread(
+        target=_run_contact_extraction_thread,
+        args=(df, ai),
+        daemon=True,
+    )
+    t.start()
+
+
+def apply_contacts_to_df(df: pd.DataFrame, contacts: dict) -> pd.DataFrame:
+    """Add a 'contact' display column built from extracted contact data."""
+    id_col = COLUMNS.get("id", "id")
+
+    def _contact_str(row):
+        tid = str(row.get(id_col, ""))
+        c = contacts.get(tid, {})
+        name = c.get("name") or ""
+        company = c.get("company") or ""
+        if name and company:
+            return f"{name} ({company})"
+        return name or company or ""
+
+    df = df.copy()
+    df["contact"] = df.apply(_contact_str, axis=1)
+    return df
+
+
+# ============================================================
 # CHATBOT HELPERS
 # ============================================================
 
-
 def _get(row: pd.Series, key: str, default: str = "") -> str:
-    """Safely retrieve a column value by logical key."""
     col = COLUMNS.get(key, "")
     if col and col in row.index:
         val = row.get(col, "")
@@ -166,55 +335,56 @@ def _get(row: pd.Series, key: str, default: str = "") -> str:
     return default
 
 
-def format_tickets_for_context(df: pd.DataFrame) -> str:
-    """Condense feature-request rows into a compact string for Claude."""
+def format_tickets_for_context(df: pd.DataFrame, contacts: dict) -> str:
     if df.empty:
         return "No feature request tickets available."
 
+    id_col = COLUMNS.get("id", "id")
     sample = df.head(CHATBOT_MAX_TICKETS)
     lines = []
 
     for i, (_, row) in enumerate(sample.iterrows(), start=1):
-        title = _get(row, "title") or f"Ticket #{i}"
-        ticket_id = _get(row, "id")
-        area = _get(row, "product_area")
-        priority = _get(row, "priority")
-        severity = _get(row, "severity")
-        submitter = _get(row, "submitter")
-        owners = _get(row, "owners")
-        ts = _get(row, "timestamp")
+        title       = _get(row, "title") or f"Ticket #{i}"
+        ticket_id   = _get(row, "id")
+        area        = _get(row, "product_area")
+        priority    = _get(row, "priority")
+        severity    = _get(row, "severity")
+        submitter   = _get(row, "submitter")
+        owners      = _get(row, "owners")
+        ts          = _get(row, "timestamp")
         description = _get(row, "description")
-        labels = _get(row, "labels")
-        epic = _get(row, "epic")
-        team = _get(row, "team")
-        status = _get(row, "status")
+        labels      = _get(row, "labels")
+        epic        = _get(row, "epic")
+        team        = _get(row, "team")
+        status      = _get(row, "status")
+
+        # Contact from extraction
+        c = contacts.get(str(row.get(id_col, "")), {})
+        contact_name    = c.get("name") or ""
+        contact_company = c.get("company") or ""
+        contact_role    = c.get("role") or ""
 
         id_part = f"sc-{ticket_id}" if ticket_id else f"#{i}"
         header = f"[{id_part}] {title}"
-        if area:
-            header += f"  |  Area: {area}"
-        if priority:
-            header += f"  |  Priority: {priority}"
-        if severity:
-            header += f"  |  Severity: {severity}"
-        if status:
-            header += f"  |  State: {status}"
-        if submitter:
-            header += f"  |  Requester: {submitter}"
-        if ts:
-            header += f"  |  Created: {str(ts)[:10]}"
+        if area:      header += f"  |  Area: {area}"
+        if priority:  header += f"  |  Priority: {priority}"
+        if severity:  header += f"  |  Severity: {severity}"
+        if status:    header += f"  |  State: {status}"
+        if submitter: header += f"  |  Requester: {submitter}"
+        if ts:        header += f"  |  Created: {str(ts)[:10]}"
 
         body_lines = [header]
         if description:
             body_lines.append(f"   Description: {description[:400]}{'...' if len(description) > 400 else ''}")
-        if labels:
-            body_lines.append(f"   Labels: {labels}")
-        if epic:
-            body_lines.append(f"   Epic: {epic}")
-        if team:
-            body_lines.append(f"   Team: {team}")
-        if owners:
-            body_lines.append(f"   Owners: {owners}")
+        if contact_name:
+            contact_line = f"   Contact: {contact_name}"
+            if contact_company: contact_line += f" ({contact_company})"
+            if contact_role:    contact_line += f" — {contact_role}"
+            body_lines.append(contact_line)
+        if labels: body_lines.append(f"   Labels: {labels}")
+        if epic:   body_lines.append(f"   Epic: {epic}")
+        if team:   body_lines.append(f"   Team: {team}")
+        if owners: body_lines.append(f"   Owners: {owners}")
 
         lines.append("\n".join(body_lines))
 
@@ -226,9 +396,9 @@ def format_tickets_for_context(df: pd.DataFrame) -> str:
     return "\n\n".join(lines) + suffix
 
 
-def build_system_prompt(df: pd.DataFrame) -> str:
+def build_system_prompt(df: pd.DataFrame, contacts: dict) -> str:
     ticket_count = min(len(df), CHATBOT_MAX_TICKETS)
-    tickets_text = format_tickets_for_context(df)
+    tickets_text = format_tickets_for_context(df, contacts)
 
     return f"""You are a product analyst specializing in NPI (New Product Introduction) impact assessment.
 
@@ -247,28 +417,26 @@ When the user describes an NPI change, respond with:
 1. **Brief restatement** of the NPI change as you understand it (one sentence).
 
 2. **Directly Addressed (N tickets):** — tickets the NPI change fully or substantially fulfills.
-   - #[number] **[Title]** — [one sentence explaining why this NPI addresses it]
+   - #[number] **[Title]** — [one sentence explaining why this NPI addresses it] | Contact: [name if known]
 
 3. **Potentially Impacted (N tickets):** — tickets in the same area that may be partially addressed, affected, or made obsolete.
-   - #[number] **[Title]** — [one sentence on the impact]
+   - #[number] **[Title]** — [one sentence on the impact] | Contact: [name if known]
 
 4. **Related Context (N tickets):** — tickets in adjacent areas worth considering together.
    - #[number] **[Title]** — [one sentence on the connection]
 
 5. **Summary** — 2–3 sentences: how much existing customer demand does this NPI cover? Are there major unaddressed themes?
 
-**Be thorough.** Include borderline tickets and note your uncertainty. Err on the side of inclusion — a false positive is better than a missed relevant ticket.
+**Be thorough.** Include borderline tickets and note your uncertainty. Err on the side of inclusion.
 
-For follow-up questions (e.g. "tell me more about #7" or "which of those can be closed?"), answer conversationally using the ticket data above."""
+For follow-up questions, answer conversationally using the ticket data above."""
 
 
 # ============================================================
 # UTILITY
 # ============================================================
 
-
 def resolve_col(key: str, df: pd.DataFrame):
-    """Return the actual column name if it exists in df, else None."""
     col = COLUMNS.get(key, "")
     return col if col and col in df.columns else None
 
@@ -277,18 +445,17 @@ def resolve_col(key: str, df: pd.DataFrame):
 # MAIN APP
 # ============================================================
 
-
 def main():
     # ── Sidebar ─────────────────────────────────────────────
     with st.sidebar:
         try:
             st.image("logo.svg", width=160)
         except Exception:
-            st.markdown("## 🚀 FR Dashboard")
+            st.markdown("## FR Dashboard")
 
         st.markdown("---")
         st.markdown("### Data")
-        if st.button("🔄 Refresh", use_container_width=True):
+        if st.button("🔄 Refresh Data", use_container_width=True):
             st.cache_data.clear()
             st.rerun()
 
@@ -298,6 +465,32 @@ def main():
     # ── Load data ────────────────────────────────────────────
     with st.spinner("Loading feature requests…"):
         df = load_feature_requests()
+
+    # ── Load contacts + auto-refresh if extraction running ───
+    contacts = load_contacts()
+    progress = load_contacts_progress()
+    if progress.get("running"):
+        st.markdown(
+            '<meta http-equiv="refresh" content="4">',
+            unsafe_allow_html=True,
+        )
+        done  = progress.get("done", 0)
+        total = progress.get("total", 1)
+        st.info(f"Extracting contacts… {done}/{total} tickets processed. Page auto-refreshes.")
+
+    # Merge contacts into df and filter to customer tickets
+    if not df.empty:
+        df = apply_contacts_to_df(df, contacts)
+        id_col_name = COLUMNS.get("id", "id")
+        # Only exclude tickets that have been analyzed AND flagged as non-customer
+        if contacts:
+            def _is_not_customer(row):
+                tid = str(row.get(id_col_name, ""))
+                c = contacts.get(tid)
+                if c is None:
+                    return False  # not yet analyzed — keep it
+                return c.get("is_customer_ticket") is False
+            df = df[~df.apply(_is_not_customer, axis=1)]
 
     # ── Tabs ─────────────────────────────────────────────────
     tab1, tab2, tab3 = st.tabs(["📋 Feature Requests", "💬 NPI Chatbot", "📊 Google Sheet"])
@@ -346,6 +539,23 @@ def main():
 
         st.markdown("---")
 
+        # ── Contact extraction controls ───────────────────────
+        contacts_extracted = sum(1 for v in contacts.values() if v.get("name"))
+        cex1, cex2 = st.columns([4, 1])
+        with cex1:
+            if progress.get("running"):
+                st.caption(f"Extracting contacts: {progress.get('done', 0)}/{progress.get('total', 0)}")
+            else:
+                st.caption(f"Contact extraction: {contacts_extracted} contacts found across {len(contacts)} tickets analyzed.")
+        with cex2:
+            ai = get_anthropic_client()
+            if not progress.get("running") and ai:
+                if st.button("Extract Contacts", use_container_width=True):
+                    start_contact_extraction(df, ai)
+                    st.rerun()
+
+        st.markdown("---")
+
         # ── Filters ──────────────────────────────────────────
         with st.expander("🔍 Search & Filter", expanded=False):
             fc1, fc2, fc3, fc4 = st.columns(4)
@@ -374,7 +584,7 @@ def main():
         # Apply filters
         fdf = df.copy()
         title_col = resolve_col("title", fdf)
-        desc_col = resolve_col("description", fdf)
+        desc_col  = resolve_col("description", fdf)
 
         if search:
             mask = pd.Series([False] * len(fdf), index=fdf.index)
@@ -394,11 +604,17 @@ def main():
             st.caption(f"Showing {len(fdf):,} of {len(df):,} tickets")
 
         # ── Table ─────────────────────────────────────────────
-        display_cols = [
-            COLUMNS[k]
-            for k in DISPLAY_KEYS
-            if COLUMNS.get(k) and COLUMNS[k] in fdf.columns
-        ]
+        all_display_keys = DISPLAY_KEYS
+        display_cols = []
+        for k in all_display_keys:
+            if k == "contact":
+                if "contact" in fdf.columns:
+                    display_cols.append("contact")
+            else:
+                col = COLUMNS.get(k)
+                if col and col in fdf.columns:
+                    display_cols.append(col)
+
         if not display_cols:
             display_cols = list(fdf.columns[:6])
 
@@ -420,23 +636,28 @@ def main():
                     if desc_col:
                         st.markdown("**Description**")
                         st.markdown(str(row.get(desc_col, "—")))
-                    uc_col = resolve_col("use_case", fdf)
-                    if uc_col and pd.notna(row.get(uc_col)):
-                        st.markdown("**Use Case**")
-                        st.markdown(str(row.get(uc_col, "—")))
-                    imp_col = resolve_col("impact", fdf)
-                    if imp_col and pd.notna(row.get(imp_col)):
-                        st.markdown("**Business Impact**")
-                        st.markdown(str(row.get(imp_col, "—")))
 
                 with dcol2:
-                    for key in ["submitter", "company", "product_area", "priority", "status", "timestamp"]:
+                    # Contact person (extracted)
+                    contact_val = str(row.get("contact", "")).strip()
+                    if contact_val:
+                        st.markdown(f"**Contact:** {contact_val}")
+                    else:
+                        id_col_name = COLUMNS.get("id", "id")
+                        tid = str(row.get(id_col_name, ""))
+                        if tid in contacts:
+                            st.markdown("**Contact:** _(none found)_")
+                        else:
+                            st.markdown("**Contact:** _(not yet extracted)_")
+
+                    for key in ["submitter", "product_area", "priority", "severity", "status", "labels", "epic", "team", "timestamp"]:
                         col_name = COLUMNS.get(key, "")
                         if col_name and col_name in row.index and pd.notna(row.get(col_name)):
                             val = row.get(col_name)
                             if hasattr(val, "strftime"):
                                 val = val.strftime("%Y-%m-%d")
-                            st.markdown(f"**{col_name}:** {val}")
+                            label = key.replace("_", " ").title()
+                            st.markdown(f"**{label}:** {val}")
 
         # ── Charts ────────────────────────────────────────────
         st.markdown("---")
@@ -445,9 +666,7 @@ def main():
         with cc1:
             if area_col and area_col in df.columns:
                 st.subheader("By Product Area")
-                area_counts = (
-                    df[area_col].astype(str).value_counts().reset_index()
-                )
+                area_counts = df[area_col].astype(str).value_counts().reset_index()
                 area_counts.columns = ["Product Area", "Count"]
                 st.bar_chart(area_counts.set_index("Product Area"))
 
@@ -494,46 +713,39 @@ def main():
         st.markdown(
             "Describe a **New Product Introduction (NPI) change** — a new feature, product update, "
             "or architectural change — and I'll identify which feature request tickets would be "
-            "impacted or addressed."
+            "impacted or addressed, including who to notify."
         )
 
         if df.empty:
             st.warning("No feature request tickets loaded. Please fix your data source first.")
             st.stop()
 
-        # Session state
         if "chat_messages" not in st.session_state:
             st.session_state.chat_messages = []
 
-        # Controls bar
         bar1, bar2 = st.columns([5, 1])
         with bar1:
             ticket_count = min(len(df), CHATBOT_MAX_TICKETS)
-            pct = ticket_count / len(df) * 100 if len(df) > 0 else 0
             label = f"Analyzing {ticket_count:,} feature request tickets"
             if ticket_count < len(df):
-                label += f" ({pct:.0f}% of total — increase CHATBOT_MAX_TICKETS to see more)"
+                label += f" ({ticket_count / len(df) * 100:.0f}% of total)"
+            if contacts_extracted:
+                label += f" · {contacts_extracted} contacts extracted"
             st.caption(label)
         with bar2:
             if st.button("🗑️ Clear Chat", use_container_width=True):
                 st.session_state.chat_messages = []
                 st.rerun()
 
-        # Render existing messages
         for msg in st.session_state.chat_messages:
             with st.chat_message(msg["role"]):
                 st.markdown(msg["content"])
 
-        # Chat input
-        if user_input := st.chat_input(
-            "e.g. 'We're adding bulk PDF export to the reporting module'…"
-        ):
-            # Show user message
+        if user_input := st.chat_input("e.g. 'We're adding bulk PDF export to the reporting module'…"):
             st.session_state.chat_messages.append({"role": "user", "content": user_input})
             with st.chat_message("user"):
                 st.markdown(user_input)
 
-            # Stream assistant response
             with st.chat_message("assistant"):
                 placeholder = st.empty()
                 full_response = ""
@@ -543,7 +755,7 @@ def main():
                     full_response = "❌ ANTHROPIC_API_KEY is not configured."
                     placeholder.markdown(full_response)
                 else:
-                    system_prompt = build_system_prompt(df)
+                    system_prompt = build_system_prompt(df, contacts)
                     api_msgs = [
                         {"role": m["role"], "content": m["content"]}
                         for m in st.session_state.chat_messages
