@@ -191,10 +191,16 @@ def _get_oauth_creds():
     return client_id, client_secret, redirect_uri
 
 
+# Server-side state store — survives the new WebSocket session on OAuth redirect
+_pending_oauth_states: set = set()
+_oauth_states_lock = threading.Lock()
+
+
 def _build_auth_url():
     client_id, _, redirect_uri = _get_oauth_creds()
     state = secrets.token_urlsafe(32)
-    st.session_state["_oauth_state"] = state
+    with _oauth_states_lock:
+        _pending_oauth_states.add(state)
     params = {
         "client_id": client_id,
         "redirect_uri": redirect_uri,
@@ -208,9 +214,10 @@ def _build_auth_url():
 
 
 def _exchange_code(code, state):
-    expected = st.session_state.get("_oauth_state")
-    if not expected or state != expected:
-        return None, "Invalid OAuth state. Please try logging in again."
+    with _oauth_states_lock:
+        if state not in _pending_oauth_states:
+            return None, "Invalid OAuth state. Please try logging in again."
+        _pending_oauth_states.discard(state)
 
     client_id, client_secret, redirect_uri = _get_oauth_creds()
     try:
