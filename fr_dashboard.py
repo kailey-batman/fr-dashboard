@@ -7,6 +7,9 @@ import json
 import os
 import base64
 import threading
+import urllib.parse
+import secrets
+import requests as _http
 from datetime import datetime
 import io
 
@@ -79,6 +82,8 @@ st.markdown("""
 # CONFIGURATION — Update these to match your Google Sheet
 # ============================================================
 
+_APP_DIR = os.path.dirname(os.path.abspath(__file__))
+
 SHEET_ID = os.environ.get("GOOGLE_SHEET_ID", "YOUR_SHEET_ID_HERE")
 MAIN_TAB = os.environ.get("MAIN_TAB_NAME", "Stories")
 
@@ -102,6 +107,7 @@ COLUMNS = {
     "team":         "team",
     "use_case":     "",
     "impact":       "",
+    "link":         "app_url",
 }
 
 # Exact value in the "type" column for feature requests.
@@ -121,7 +127,7 @@ CUSTOMER_KEYWORDS = [
 ANALYSIS_BATCH_SIZE = 20
 
 # Columns shown in the main data table (logical key names from COLUMNS dict above)
-DISPLAY_KEYS = ["id", "timestamp", "title", "submitter", "contact", "product_area", "priority", "severity", "status", "labels", "epic"]
+DISPLAY_KEYS = ["id", "title", "link", "timestamp", "submitter", "contact", "product_area", "priority", "severity", "status", "labels", "epic"]
 
 # Max tickets sent to the chatbot as context
 CHATBOT_MAX_TICKETS = 500
@@ -163,6 +169,237 @@ def get_gsheet_client():
         return gspread.authorize(creds)
 
     return None
+
+
+# ============================================================
+# GOOGLE OAUTH AUTHENTICATION
+# ============================================================
+
+_ALLOWED_DOMAIN = "fieldguide.io"
+_GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
+_GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
+_GOOGLE_USERINFO_URL = "https://www.googleapis.com/oauth2/v3/userinfo"
+_OAUTH_SCOPES = "openid email profile"
+_ACCESS_LOG_TAB = "Access Log"
+_ACCESS_LOG_FILE = os.path.join(_APP_DIR, "access_log.json")
+
+
+def _get_oauth_creds():
+    client_id = os.environ.get("GOOGLE_OAUTH_CLIENT_ID", "")
+    client_secret = os.environ.get("GOOGLE_OAUTH_CLIENT_SECRET", "")
+    redirect_uri = os.environ.get("GOOGLE_OAUTH_REDIRECT_URI", "http://localhost:8501")
+    return client_id, client_secret, redirect_uri
+
+
+def _build_auth_url():
+    client_id, _, redirect_uri = _get_oauth_creds()
+    state = secrets.token_urlsafe(32)
+    st.session_state["_oauth_state"] = state
+    params = {
+        "client_id": client_id,
+        "redirect_uri": redirect_uri,
+        "response_type": "code",
+        "scope": _OAUTH_SCOPES,
+        "state": state,
+        "access_type": "online",
+        "prompt": "select_account",
+    }
+    return f"{_GOOGLE_AUTH_URL}?{urllib.parse.urlencode(params)}"
+
+
+def _exchange_code(code, state):
+    expected = st.session_state.get("_oauth_state")
+    if not expected or state != expected:
+        return None, "Invalid OAuth state. Please try logging in again."
+
+    client_id, client_secret, redirect_uri = _get_oauth_creds()
+    try:
+        resp = _http.post(_GOOGLE_TOKEN_URL, data={
+            "code": code,
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "redirect_uri": redirect_uri,
+            "grant_type": "authorization_code",
+        }, timeout=10)
+    except Exception as e:
+        return None, f"Token exchange error: {e}"
+
+    if not resp.ok:
+        return None, "Token exchange failed. Please try again."
+
+    access_token = resp.json().get("access_token")
+    if not access_token:
+        return None, "No access token received."
+
+    try:
+        ui_resp = _http.get(_GOOGLE_USERINFO_URL,
+            headers={"Authorization": f"Bearer {access_token}"}, timeout=10)
+    except Exception as e:
+        return None, f"User info error: {e}"
+
+    if not ui_resp.ok:
+        return None, "Failed to retrieve user info."
+
+    info = ui_resp.json()
+    email = info.get("email", "")
+    if not email.lower().endswith(f"@{_ALLOWED_DOMAIN}"):
+        return None, f"Access denied. Only @{_ALLOWED_DOMAIN} accounts are permitted."
+
+    return {"email": email, "name": info.get("name", email), "picture": info.get("picture", "")}, None
+
+
+def _show_login_page():
+    client_id, _, _ = _get_oauth_creds()
+    if not client_id:
+        st.error(
+            "Google OAuth is not configured. "
+            "Set GOOGLE_OAUTH_CLIENT_ID, GOOGLE_OAUTH_CLIENT_SECRET, and "
+            "GOOGLE_OAUTH_REDIRECT_URI environment variables."
+        )
+        return
+
+    auth_url = _build_auth_url()
+
+    logo_html = ""
+    logo_path = os.path.join(_APP_DIR, "logo.svg")
+    if os.path.exists(logo_path):
+        with open(logo_path, "r") as f:
+            logo_svg = f.read()
+        logo_b64 = base64.b64encode(logo_svg.encode()).decode()
+        logo_html = f'<img src="data:image/svg+xml;base64,{logo_b64}" style="width:60px;height:60px;margin-bottom:8px;" />'
+
+    google_logo_svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" width="20" height="20">'
+        '<path fill="#4285F4" d="M44.5 20H24v8.5h11.8C34.7 33.9 29.1 37 24 37c-7.2 0-13-5.8-13-13s5.8-13 13-13c3.1 0 5.9 1.1 8.1 2.9l6.4-6.4C34.6 4.1 29.6 2 24 2 11.8 2 2 11.8 2 24s9.8 22 22 22c11 0 21-8 21-22 0-1.3-.2-2.7-.5-4z"/>'
+        '<path fill="#34A853" d="M6.3 14.7l7 5.1C15.1 16.2 19.2 13 24 13c3.1 0 5.9 1.1 8.1 2.9l6.4-6.4C34.6 4.1 29.6 2 24 2 16.2 2 9.4 7.3 6.3 14.7z"/>'
+        '<path fill="#FBBC05" d="M24 46c5.5 0 10.5-1.8 14.4-4.9l-6.7-5.5C29.7 37.5 27 38.5 24 38.5c-5.1 0-9.4-3.2-11.1-7.7l-7 5.4C9.2 42.3 16.1 46 24 46z"/>'
+        '<path fill="#EA4335" d="M44.5 20H24v8.5h11.8c-1 3-3.2 5.5-6.1 7.1l6.7 5.5C41.1 37.3 45 31.1 45 24c0-1.3-.2-2.7-.5-4z"/>'
+        '</svg>'
+    )
+
+    st.markdown(f"""
+    <style>
+        .stApp {{ background-color: #2D333B; }}
+        .login-wrapper {{
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 80vh;
+            padding: 2rem;
+        }}
+        .login-card {{
+            background-color: #373E47;
+            border: 1px solid #444C56;
+            border-radius: 16px;
+            padding: 48px 40px;
+            max-width: 420px;
+            width: 100%;
+            text-align: center;
+            box-shadow: 0 8px 32px rgba(0,0,0,0.4);
+        }}
+        .login-card h1 {{ color: #00E676; font-size: 1.7rem; margin: 12px 0 8px 0; }}
+        .login-card .login-sub {{ color: #9E9E9E; font-size: 0.95rem; margin-bottom: 36px; }}
+        .google-btn {{
+            display: inline-flex;
+            align-items: center;
+            gap: 12px;
+            background-color: #ffffff;
+            color: #3c4043;
+            font-size: 15px;
+            font-weight: 500;
+            padding: 12px 24px;
+            border-radius: 8px;
+            text-decoration: none !important;
+            border: 1px solid #dadce0;
+            transition: background-color 0.15s, box-shadow 0.15s;
+        }}
+        .google-btn:hover {{
+            background-color: #f8f9fa;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.25);
+            color: #3c4043 !important;
+        }}
+        .login-note {{
+            color: #616a75;
+            font-size: 0.75rem;
+            margin-top: 24px;
+        }}
+    </style>
+    <div class="login-wrapper">
+        <div class="login-card">
+            {logo_html}
+            <h1>Feature Request Dashboard</h1>
+            <div class="login-sub">Sign in with your Fieldguide Google account to continue.</div>
+            <a href="{auth_url}" class="google-btn">
+                {google_logo_svg}
+                Sign in with Google
+            </a>
+            <div class="login-note">Only @fieldguide.io accounts are permitted.</div>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+
+def _is_admin():
+    email = st.session_state.get("_auth_user", {}).get("email", "").lower()
+    raw = os.environ.get("DASHBOARD_ADMIN_EMAILS", "")
+    admins = [e.strip().lower() for e in raw.split(",") if e.strip()]
+    return bool(admins) and email in admins
+
+
+def _log_visit(user_info):
+    entry = {
+        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "email": user_info.get("email", ""),
+        "name": user_info.get("name", ""),
+    }
+    # Local JSON file
+    try:
+        existing = []
+        if os.path.exists(_ACCESS_LOG_FILE):
+            with open(_ACCESS_LOG_FILE, "r") as f:
+                existing = json.load(f)
+        existing.append(entry)
+        with open(_ACCESS_LOG_FILE, "w") as f:
+            json.dump(existing, f, indent=2)
+    except Exception:
+        pass
+    # Google Sheets
+    try:
+        client = get_gsheet_client()
+        if client and SHEET_ID != "YOUR_SHEET_ID_HERE":
+            ss = client.open_by_key(SHEET_ID)
+            try:
+                ws = ss.worksheet(_ACCESS_LOG_TAB)
+            except Exception:
+                ws = ss.add_worksheet(title=_ACCESS_LOG_TAB, rows=5000, cols=3)
+                ws.append_row(["Timestamp", "Email", "Name"])
+            ws.append_row([entry["timestamp"], entry["email"], entry["name"]])
+    except Exception:
+        pass
+
+
+def _load_access_log():
+    try:
+        client = get_gsheet_client()
+        if client and SHEET_ID != "YOUR_SHEET_ID_HERE":
+            ss = client.open_by_key(SHEET_ID)
+            ws = ss.worksheet(_ACCESS_LOG_TAB)
+            rows = ws.get_all_records()
+            if rows:
+                return pd.DataFrame(rows)
+    except Exception:
+        pass
+    if os.path.exists(_ACCESS_LOG_FILE):
+        try:
+            with open(_ACCESS_LOG_FILE, "r") as f:
+                data = json.load(f)
+            if data:
+                return pd.DataFrame(data).rename(
+                    columns={"timestamp": "Timestamp", "email": "Email", "name": "Name"}
+                )
+        except Exception:
+            pass
+    return pd.DataFrame(columns=["Timestamp", "Email", "Name"])
 
 
 # ============================================================
@@ -614,6 +851,23 @@ def resolve_col(key: str, df: pd.DataFrame):
 # ============================================================
 
 def main():
+    # ── OAuth callback ────────────────────────────────────────
+    _qp = st.query_params
+    if "code" in _qp and "state" in _qp:
+        with st.spinner("Signing you in…"):
+            _user, _err = _exchange_code(_qp["code"], _qp["state"])
+        if _err:
+            st.error(_err)
+        else:
+            st.session_state["_auth_user"] = _user
+            _log_visit(_user)
+        st.query_params.clear()
+        st.rerun()
+
+    if not st.session_state.get("_auth_user"):
+        _show_login_page()
+        st.stop()
+
     # ── Header ───────────────────────────────────────────────
     app_dir = os.path.dirname(os.path.abspath(__file__))
     logo_path = os.path.join(app_dir, "logo.svg")
@@ -631,6 +885,17 @@ def main():
         st.markdown('<h1 style="color:#00E676;">Feature Request Dashboard</h1>', unsafe_allow_html=True)
 
     st.markdown('<div class="header-subtitle">Customer feature requests from Shortcut · NPI impact analysis</div>', unsafe_allow_html=True)
+
+    # ── Logged-in user bar ────────────────────────────────────
+    _auth_user = st.session_state.get("_auth_user", {})
+    _col_spacer, _col_user = st.columns([6, 1])
+    with _col_user:
+        with st.popover(f"👤 {_auth_user.get('email', '')}", use_container_width=True):
+            st.markdown(f"**{_auth_user.get('name', '')}**")
+            st.markdown(f"`{_auth_user.get('email', '')}`")
+            if st.button("Sign out", key="_logout_btn", use_container_width=True):
+                del st.session_state["_auth_user"]
+                st.rerun()
 
     # ── Sidebar ─────────────────────────────────────────────
     with st.sidebar:
@@ -696,15 +961,29 @@ def main():
                 sample = df["custom_fields"].dropna().astype(str)
                 sample = sample[sample.str.strip().str.len() > 5]
                 if not sample.empty:
-                    st.text("First non-empty custom_fields:")
-                    st.code(sample.iloc[0][:500])
+                    st.text("Raw custom_fields (first row):")
+                    st.code(sample.iloc[0][:800])
+                    st.text("Parsed keys + values (first row):")
+                    st.json(_parse_custom_fields_text(sample.iloc[0]))
+                    st.text("All unique keys across first 20 rows:")
+                    all_keys = set()
+                    for raw in sample.head(20):
+                        all_keys.update(_parse_custom_fields_text(raw).keys())
+                    st.write(sorted(all_keys))
                 else:
                     st.text("custom_fields is empty for all rows.")
             elif df.empty:
                 st.text("No data loaded.")
 
     # ── Tabs ─────────────────────────────────────────────────
-    tab1, tab2, tab3 = st.tabs(["📋 Feature Requests", "💬 NPI Chatbot", "📊 Google Sheet"])
+    _admin_mode = _is_admin()
+    if _admin_mode:
+        tab1, tab2, tab3, tab_admin = st.tabs(
+            ["📋 Feature Requests", "💬 NPI Chatbot", "📊 Google Sheet", "Admin"]
+        )
+    else:
+        tab1, tab2, tab3 = st.tabs(["📋 Feature Requests", "💬 NPI Chatbot", "📊 Google Sheet"])
+        tab_admin = None
 
     # ════════════════════════════════════════════════════════
     # TAB 1 — FEATURE REQUESTS DASHBOARD
@@ -823,7 +1102,15 @@ def main():
         if not display_cols:
             display_cols = list(fdf.columns[:6])
 
-        st.dataframe(fdf[display_cols], use_container_width=True, height=380)
+        col_config = {}
+        link_col = COLUMNS.get("link", "")
+        if link_col and link_col in display_cols:
+            col_config[link_col] = st.column_config.LinkColumn(
+                "Link",
+                display_text="Shortcut Link",
+            )
+
+        st.dataframe(fdf[display_cols], use_container_width=True, height=380, column_config=col_config)
 
         # ── Detail view ───────────────────────────────────────
         st.markdown("---")
@@ -1001,6 +1288,48 @@ def main():
                 f'?usp=sharing&rm=minimal" width="100%" height="720" frameborder="0"></iframe>',
                 unsafe_allow_html=True,
             )
+
+    # ════════════════════════════════════════════════════════
+    # TAB ADMIN (admin users only)
+    # ════════════════════════════════════════════════════════
+    if _admin_mode and tab_admin is not None:
+        with tab_admin:
+            st.subheader("Access Log")
+            st.markdown("Every time a user authenticates, their login is recorded here.")
+
+            log_df = _load_access_log()
+
+            if log_df.empty:
+                st.info("No visits recorded yet. Logs are written when users sign in.")
+            else:
+                log_df.columns = [c.capitalize() for c in log_df.columns]
+                if "Timestamp" in log_df.columns:
+                    log_df["Timestamp"] = pd.to_datetime(log_df["Timestamp"], errors="coerce")
+                    log_df = log_df.sort_values("Timestamp", ascending=False).reset_index(drop=True)
+                    log_df["Timestamp"] = log_df["Timestamp"].dt.strftime("%Y-%m-%d %H:%M:%S")
+
+                total_visits = len(log_df)
+                unique_users = log_df["Email"].nunique() if "Email" in log_df.columns else 0
+                m1, m2 = st.columns(2)
+                m1.metric("Total logins", total_visits)
+                m2.metric("Unique users", unique_users)
+
+                st.divider()
+
+                if "Email" in log_df.columns:
+                    st.markdown("**Logins per user**")
+                    counts = (
+                        log_df.groupby("Email")
+                        .agg(Logins=("Email", "count"), Last_seen=("Timestamp", "max"))
+                        .reset_index()
+                        .rename(columns={"Last_seen": "Last seen"})
+                        .sort_values("Logins", ascending=False)
+                    )
+                    st.dataframe(counts, use_container_width=True, hide_index=True)
+                    st.divider()
+
+                st.markdown("**Full login history**")
+                st.dataframe(log_df, use_container_width=True, hide_index=True)
 
 
 if __name__ == "__main__":
