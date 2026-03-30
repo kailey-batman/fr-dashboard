@@ -258,6 +258,9 @@ def _show_login_page():
         )
         return
 
+    if "_auth_error" in st.session_state:
+        st.error(st.session_state.pop("_auth_error"))
+
     auth_url = _build_auth_url()
 
     logo_html = ""
@@ -857,7 +860,7 @@ def main():
         with st.spinner("Signing you in…"):
             _user, _err = _exchange_code(_qp["code"], _qp["state"])
         if _err:
-            st.error(_err)
+            st.session_state["_auth_error"] = _err
         else:
             st.session_state["_auth_user"] = _user
             _log_visit(_user)
