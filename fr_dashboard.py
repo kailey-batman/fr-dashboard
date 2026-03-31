@@ -302,60 +302,30 @@ def _show_login_page():
         logo_b64 = base64.b64encode(logo_svg.encode()).decode()
         logo_html = f'<img src="data:image/svg+xml;base64,{logo_b64}" style="width:60px;height:60px;margin-bottom:8px;" />'
 
-    google_logo_svg = (
-        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" width="20" height="20">'
-        '<path fill="#4285F4" d="M44.5 20H24v8.5h11.8C34.7 33.9 29.1 37 24 37c-7.2 0-13-5.8-13-13s5.8-13 13-13c3.1 0 5.9 1.1 8.1 2.9l6.4-6.4C34.6 4.1 29.6 2 24 2 11.8 2 2 11.8 2 24s9.8 22 22 22c11 0 21-8 21-22 0-1.3-.2-2.7-.5-4z"/>'
-        '<path fill="#34A853" d="M6.3 14.7l7 5.1C15.1 16.2 19.2 13 24 13c3.1 0 5.9 1.1 8.1 2.9l6.4-6.4C34.6 4.1 29.6 2 24 2 16.2 2 9.4 7.3 6.3 14.7z"/>'
-        '<path fill="#FBBC05" d="M24 46c5.5 0 10.5-1.8 14.4-4.9l-6.7-5.5C29.7 37.5 27 38.5 24 38.5c-5.1 0-9.4-3.2-11.1-7.7l-7 5.4C9.2 42.3 16.1 46 24 46z"/>'
-        '<path fill="#EA4335" d="M44.5 20H24v8.5h11.8c-1 3-3.2 5.5-6.1 7.1l6.7 5.5C41.1 37.3 45 31.1 45 24c0-1.3-.2-2.7-.5-4z"/>'
-        '</svg>'
-    )
-
     st.markdown(f"""
     <style>
         .stApp {{ background-color: #2D333B; }}
         .login-wrapper {{
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            min-height: 80vh;
-            padding: 2rem;
+            display: flex; justify-content: center; align-items: center;
+            min-height: 60vh; padding: 2rem;
         }}
         .login-card {{
-            background-color: #373E47;
-            border: 1px solid #444C56;
-            border-radius: 16px;
-            padding: 48px 40px;
-            max-width: 420px;
-            width: 100%;
-            text-align: center;
+            background-color: #373E47; border: 1px solid #444C56; border-radius: 16px;
+            padding: 48px 40px; max-width: 420px; width: 100%; text-align: center;
             box-shadow: 0 8px 32px rgba(0,0,0,0.4);
         }}
         .login-card h1 {{ color: #00E676; font-size: 1.7rem; margin: 12px 0 8px 0; }}
-        .login-card .login-sub {{ color: #9E9E9E; font-size: 0.95rem; margin-bottom: 36px; }}
-        .google-btn {{
-            display: inline-flex;
-            align-items: center;
-            gap: 12px;
-            background-color: #ffffff;
-            color: #3c4043;
-            font-size: 15px;
-            font-weight: 500;
-            padding: 12px 24px;
-            border-radius: 8px;
-            text-decoration: none !important;
-            border: 1px solid #dadce0;
-            transition: background-color 0.15s, box-shadow 0.15s;
+        .login-card .login-sub {{ color: #9E9E9E; font-size: 0.95rem; margin-bottom: 12px; }}
+        .login-note {{ color: #616a75; font-size: 0.75rem; margin-top: 8px; }}
+        /* Style the Streamlit link button to look like Google Sign-In */
+        .stLinkButton > a {{
+            background-color: #ffffff !important; color: #3c4043 !important;
+            border: 1px solid #dadce0 !important; border-radius: 8px !important;
+            font-weight: 500 !important;
         }}
-        .google-btn:hover {{
-            background-color: #f8f9fa;
-            box-shadow: 0 2px 8px rgba(0,0,0,0.25);
-            color: #3c4043 !important;
-        }}
-        .login-note {{
-            color: #616a75;
-            font-size: 0.75rem;
-            margin-top: 24px;
+        .stLinkButton > a:hover {{
+            background-color: #f8f9fa !important;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.25) !important;
         }}
     </style>
     <div class="login-wrapper">
@@ -363,14 +333,15 @@ def _show_login_page():
             {logo_html}
             <h1>Feature Request Dashboard</h1>
             <div class="login-sub">Sign in with your Fieldguide Google account to continue.</div>
-            <a href="{auth_url}" onclick="window.top.location.href=this.href; return false;" class="google-btn">
-                {google_logo_svg}
-                Sign in with Google
-            </a>
-            <div class="login-note">Only @fieldguide.io accounts are permitted.</div>
         </div>
     </div>
     """, unsafe_allow_html=True)
+
+    _c1, _c2, _c3 = st.columns([1.5, 2, 1.5])
+    with _c2:
+        st.link_button("Sign in with Google", auth_url, use_container_width=True)
+
+    st.markdown('<div class="login-note" style="text-align:center;">Only @fieldguide.io accounts are permitted.</div>', unsafe_allow_html=True)
 
 
 def _is_admin():
@@ -892,6 +863,10 @@ if not st.session_state.get("_auth_user"):
         _restored = _decode_auth(_cookie_val)
         if _restored:
             st.session_state["_auth_user"] = _restored
+    elif not st.session_state.get("_cookie_check_done"):
+        # CookieManager may not have loaded yet on first render — retry once
+        st.session_state["_cookie_check_done"] = True
+        st.rerun()
 
 _qp = st.query_params
 if "code" in _qp:
