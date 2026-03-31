@@ -363,7 +363,7 @@ def _show_login_page():
             {logo_html}
             <h1>Feature Request Dashboard</h1>
             <div class="login-sub">Sign in with your Fieldguide Google account to continue.</div>
-            <a href="{auth_url}" target="_self" class="google-btn">
+            <a href="{auth_url}" onclick="window.top.location.href=this.href; return false;" class="google-btn">
                 {google_logo_svg}
                 Sign in with Google
             </a>
