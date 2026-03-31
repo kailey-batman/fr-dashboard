@@ -969,19 +969,18 @@ def main():
     progress = load_contacts_progress()
     ai = get_anthropic_client()
 
-    if not df.empty and ai:
+    # Count unanalyzed tickets
+    _unanalyzed_count = 0
+    if not df.empty:
         id_col_name = COLUMNS.get("id", "id")
-        unanalyzed = [
-            str(row.get(id_col_name, ""))
-            for _, row in df.iterrows()
+        _unanalyzed_count = sum(
+            1 for _, row in df.iterrows()
             if str(row.get(id_col_name, "")) not in contacts
-        ]
-        if unanalyzed and not progress.get("running"):
-            start_contact_extraction(df, ai)
-            progress = {"running": True, "done": 0, "total": len(df)}
+        )
 
     if progress.get("running"):
-        st.markdown('<meta http-equiv="refresh" content="4">', unsafe_allow_html=True)
+        from streamlit_autorefresh import st_autorefresh
+        st_autorefresh(interval=4000, key="analysis_refresh")
         done  = progress.get("done", 0)
         total = progress.get("total", 1)
         st.markdown(f"""
@@ -990,6 +989,9 @@ def main():
         </div>
         """, unsafe_allow_html=True)
         st.progress(done / total if total > 0 else 0)
+    elif _unanalyzed_count > 0 and ai:
+        if st.button(f"Analyze {_unanalyzed_count} new tickets", type="primary"):
+            start_contact_extraction(df, ai)
 
     # Merge contacts into df and filter to customer tickets
     if not df.empty:

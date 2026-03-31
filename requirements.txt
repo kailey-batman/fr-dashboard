@@ -3,4 +3,4 @@ anthropic>=0.49.0
 gspread>=6.0.0
 google-auth>=2.0.0
 pandas>=2.0.0
-extra-streamlit-components>=0.1.60
+streamlit-autorefresh
