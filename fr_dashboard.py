@@ -10,8 +10,11 @@ import threading
 import urllib.parse
 import secrets
 import requests as _http
-from datetime import datetime
+import hmac
+import hashlib
+from datetime import datetime, timedelta
 import io
+import extra_streamlit_components as stx
 
 # ============================================================
 # PAGE CONFIG
@@ -174,6 +177,38 @@ def get_gsheet_client():
 # ============================================================
 # GOOGLE OAUTH AUTHENTICATION
 # ============================================================
+
+_AUTH_COOKIE = "fg_auth"
+_COOKIE_TTL_HOURS = 24
+
+
+def _cookie_mgr():
+    return stx.CookieManager(key="_fg_cookie_mgr")
+
+
+def _encode_auth(user):
+    secret = os.environ.get("COOKIE_SECRET", os.environ.get("GOOGLE_OAUTH_CLIENT_SECRET", "fg-dashboard"))
+    exp = (datetime.utcnow() + timedelta(hours=_COOKIE_TTL_HOURS)).isoformat()
+    payload = json.dumps({"u": user, "e": exp}, separators=(",", ":"))
+    sig = hmac.new(secret.encode(), payload.encode(), hashlib.sha256).hexdigest()
+    return base64.b64encode(f"{payload}.{sig}".encode()).decode()
+
+
+def _decode_auth(value):
+    try:
+        secret = os.environ.get("COOKIE_SECRET", os.environ.get("GOOGLE_OAUTH_CLIENT_SECRET", "fg-dashboard"))
+        decoded = base64.b64decode(value.encode()).decode()
+        payload_str, sig = decoded.rsplit(".", 1)
+        expected = hmac.new(secret.encode(), payload_str.encode(), hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(expected, sig):
+            return None
+        data = json.loads(payload_str)
+        if datetime.fromisoformat(data["e"]) < datetime.utcnow():
+            return None
+        return data["u"]
+    except Exception:
+        return None
+
 
 _ALLOWED_DOMAIN = "fieldguide.io"
 _GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
@@ -850,6 +885,17 @@ def resolve_col(key: str, df: pd.DataFrame):
 # ============================================================
 
 def main():
+    # ── Cookie manager (must render on every run) ─────────────
+    _cookies = _cookie_mgr()
+
+    # ── Restore session from cookie ───────────────────────────
+    if not st.session_state.get("_auth_user"):
+        _cookie_val = _cookies.get(_AUTH_COOKIE)
+        if _cookie_val:
+            _restored = _decode_auth(_cookie_val)
+            if _restored:
+                st.session_state["_auth_user"] = _restored
+
     # ── OAuth callback ────────────────────────────────────────
     _qp = st.query_params
     if "code" in _qp and "state" in _qp:
@@ -860,6 +906,8 @@ def main():
         else:
             st.session_state["_auth_user"] = _user
             _log_visit(_user)
+            _cookies.set(_AUTH_COOKIE, _encode_auth(_user),
+                         expires_at=datetime.now() + timedelta(hours=_COOKIE_TTL_HOURS))
         st.query_params.clear()
         st.rerun()
 
@@ -894,6 +942,7 @@ def main():
             st.markdown(f"`{_auth_user.get('email', '')}`")
             if st.button("Sign out", key="_logout_btn", use_container_width=True):
                 del st.session_state["_auth_user"]
+                _cookie_mgr().delete(_AUTH_COOKIE)
                 st.rerun()
 
     # ── Sidebar ─────────────────────────────────────────────
