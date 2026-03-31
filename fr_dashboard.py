@@ -77,21 +77,6 @@ st.markdown("""
     }
     .cat-stat-card .cat-name { color: #00E676; font-weight: 600; font-size: 0.9rem; }
     .cat-stat-card .cat-detail { color: #9E9E9E; font-size: 0.8rem; }
-
-    .awaiting-input {
-        display: flex; align-items: center; gap: 10px;
-        background-color: #1A2F1A; border: 1px solid #00E67644;
-        border-radius: 8px; padding: 10px 16px; margin: 12px 0 4px 0;
-    }
-    .awaiting-input .pulse-dot {
-        width: 8px; height: 8px; border-radius: 50%; background-color: #00E676;
-        animation: pulse 1.5s ease-in-out infinite;
-    }
-    @keyframes pulse {
-        0%, 100% { opacity: 1; transform: scale(1); }
-        50% { opacity: 0.4; transform: scale(0.75); }
-    }
-    .awaiting-input .awaiting-text { color: #9E9E9E; font-size: 0.85rem; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -264,10 +249,10 @@ def _get_oauth_creds():
     return client_id, client_secret, redirect_uri
 
 
-def _build_auth_url():
+def _build_auth_params():
     client_id, _, redirect_uri = _get_oauth_creds()
     state = secrets.token_urlsafe(32)
-    params = {
+    return {
         "client_id": client_id,
         "redirect_uri": redirect_uri,
         "response_type": "code",
@@ -276,7 +261,6 @@ def _build_auth_url():
         "access_type": "online",
         "prompt": "select_account",
     }
-    return f"{_GOOGLE_AUTH_URL}?{urllib.parse.urlencode(params)}"
 
 
 def _exchange_code(code, state):
@@ -330,13 +314,7 @@ def _show_login_page():
     if "_auth_error" in st.session_state:
         st.error(st.session_state.pop("_auth_error"))
 
-    auth_url = _build_auth_url()
-
-    # If user clicked login, redirect via JS (navigates same tab)
-    if st.session_state.get("_do_login"):
-        del st.session_state["_do_login"]
-        _stc.html(f'<script>window.parent.location.href="{auth_url}";</script>', height=0)
-        st.stop()
+    auth_params = _build_auth_params()
 
     logo_html = ""
     logo_path = os.path.join(_APP_DIR, "logo.svg")
@@ -346,12 +324,17 @@ def _show_login_page():
         logo_b64 = base64.b64encode(logo_svg.encode()).decode()
         logo_html = f'<img src="data:image/svg+xml;base64,{logo_b64}" style="width:60px;height:60px;margin-bottom:8px;" />'
 
+    hidden_fields = "".join(
+        f'<input type="hidden" name="{k}" value="{v}">'
+        for k, v in auth_params.items()
+    )
+
     st.markdown(f"""
     <style>
         .stApp {{ background-color: #2D333B; }}
         .login-wrapper {{
             display: flex; justify-content: center; align-items: center;
-            min-height: 60vh; padding: 2rem;
+            min-height: 70vh; padding: 2rem;
         }}
         .login-card {{
             background-color: #373E47; border: 1px solid #444C56; border-radius: 16px;
@@ -359,25 +342,33 @@ def _show_login_page():
             box-shadow: 0 8px 32px rgba(0,0,0,0.4);
         }}
         .login-card h1 {{ color: #00E676; font-size: 1.7rem; margin: 12px 0 8px 0; }}
-        .login-card .login-sub {{ color: #9E9E9E; font-size: 0.95rem; margin-bottom: 12px; }}
-        .login-note {{ color: #616a75; font-size: 0.75rem; margin-top: 8px; }}
+        .login-card .login-sub {{ color: #9E9E9E; font-size: 0.95rem; margin-bottom: 32px; }}
+        .login-note {{ color: #616a75; font-size: 0.75rem; margin-top: 20px; }}
+        .google-btn {{
+            display: inline-flex; align-items: center; gap: 12px;
+            background-color: #ffffff; color: #3c4043; font-size: 15px;
+            font-weight: 500; padding: 12px 24px; border-radius: 8px;
+            border: 1px solid #dadce0; cursor: pointer;
+            font-family: -apple-system, sans-serif;
+        }}
+        .google-btn:hover {{ background-color: #f8f9fa; box-shadow: 0 2px 8px rgba(0,0,0,0.25); }}
     </style>
     <div class="login-wrapper">
         <div class="login-card">
             {logo_html}
             <h1>Feature Request Dashboard</h1>
             <div class="login-sub">Sign in with your Fieldguide Google account to continue.</div>
+            <form action="{_GOOGLE_AUTH_URL}" method="GET">
+                {hidden_fields}
+                <button type="submit" class="google-btn">
+                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" width="20" height="20"><path fill="#4285F4" d="M44.5 20H24v8.5h11.8C34.7 33.9 29.1 37 24 37c-7.2 0-13-5.8-13-13s5.8-13 13-13c3.1 0 5.9 1.1 8.1 2.9l6.4-6.4C34.6 4.1 29.6 2 24 2 11.8 2 2 11.8 2 24s9.8 22 22 22c11 0 21-8 21-22 0-1.3-.2-2.7-.5-4z"/><path fill="#34A853" d="M6.3 14.7l7 5.1C15.1 16.2 19.2 13 24 13c3.1 0 5.9 1.1 8.1 2.9l6.4-6.4C34.6 4.1 29.6 2 24 2 16.2 2 9.4 7.3 6.3 14.7z"/><path fill="#FBBC05" d="M24 46c5.5 0 10.5-1.8 14.4-4.9l-6.7-5.5C29.7 37.5 27 38.5 24 38.5c-5.1 0-9.4-3.2-11.1-7.7l-7 5.4C9.2 42.3 16.1 46 24 46z"/><path fill="#EA4335" d="M44.5 20H24v8.5h11.8c-1 3-3.2 5.5-6.1 7.1l6.7 5.5C41.1 37.3 45 31.1 45 24c0-1.3-.2-2.7-.5-4z"/></svg>
+                    Sign in with Google
+                </button>
+            </form>
+            <div class="login-note">Only @fieldguide.io accounts are permitted.</div>
         </div>
     </div>
     """, unsafe_allow_html=True)
-
-    _c1, _c2, _c3 = st.columns([1.5, 2, 1.5])
-    with _c2:
-        if st.button("Sign in with Google", use_container_width=True, type="primary"):
-            st.session_state["_do_login"] = True
-            st.rerun()
-
-    st.markdown('<div class="login-note" style="text-align:center;">Only @fieldguide.io accounts are permitted.</div>', unsafe_allow_html=True)
 
 
 def _is_admin():
@@ -1290,21 +1281,6 @@ def main():
         for msg in st.session_state.chat_messages:
             with st.chat_message(msg["role"]):
                 st.markdown(msg["content"])
-
-        # Show awaiting-input notification when Claude is ready
-        if not st.session_state.chat_messages or st.session_state.chat_messages[-1]["role"] == "assistant":
-            hint = (
-                "Describe an NPI change to get started..."
-                if not st.session_state.chat_messages
-                else "Awaiting your next input..."
-            )
-            st.markdown(
-                f'<div class="awaiting-input">'
-                f'<div class="pulse-dot"></div>'
-                f'<span class="awaiting-text">{hint}</span>'
-                f'</div>',
-                unsafe_allow_html=True,
-            )
 
         if user_input := st.chat_input("e.g. 'We're adding bulk PDF export to the reporting module'…"):
             st.session_state.chat_messages.append({"role": "user", "content": user_input})
