@@ -77,6 +77,21 @@ st.markdown("""
     }
     .cat-stat-card .cat-name { color: #00E676; font-weight: 600; font-size: 0.9rem; }
     .cat-stat-card .cat-detail { color: #9E9E9E; font-size: 0.8rem; }
+
+    .awaiting-input {
+        display: flex; align-items: center; gap: 10px;
+        background-color: #1A2F1A; border: 1px solid #00E67644;
+        border-radius: 8px; padding: 10px 16px; margin: 12px 0 4px 0;
+    }
+    .awaiting-input .pulse-dot {
+        width: 8px; height: 8px; border-radius: 50%; background-color: #00E676;
+        animation: pulse 1.5s ease-in-out infinite;
+    }
+    @keyframes pulse {
+        0%, 100% { opacity: 1; transform: scale(1); }
+        50% { opacity: 0.4; transform: scale(0.75); }
+    }
+    .awaiting-input .awaiting-text { color: #9E9E9E; font-size: 0.85rem; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -317,6 +332,12 @@ def _show_login_page():
 
     auth_url = _build_auth_url()
 
+    # If user clicked login, redirect via JS (navigates same tab)
+    if st.session_state.get("_do_login"):
+        del st.session_state["_do_login"]
+        _stc.html(f'<script>window.parent.location.href="{auth_url}";</script>', height=0)
+        st.stop()
+
     logo_html = ""
     logo_path = os.path.join(_APP_DIR, "logo.svg")
     if os.path.exists(logo_path):
@@ -340,16 +361,6 @@ def _show_login_page():
         .login-card h1 {{ color: #00E676; font-size: 1.7rem; margin: 12px 0 8px 0; }}
         .login-card .login-sub {{ color: #9E9E9E; font-size: 0.95rem; margin-bottom: 12px; }}
         .login-note {{ color: #616a75; font-size: 0.75rem; margin-top: 8px; }}
-        /* Style the Streamlit link button to look like Google Sign-In */
-        .stLinkButton > a {{
-            background-color: #ffffff !important; color: #3c4043 !important;
-            border: 1px solid #dadce0 !important; border-radius: 8px !important;
-            font-weight: 500 !important;
-        }}
-        .stLinkButton > a:hover {{
-            background-color: #f8f9fa !important;
-            box-shadow: 0 2px 8px rgba(0,0,0,0.25) !important;
-        }}
     </style>
     <div class="login-wrapper">
         <div class="login-card">
@@ -362,7 +373,9 @@ def _show_login_page():
 
     _c1, _c2, _c3 = st.columns([1.5, 2, 1.5])
     with _c2:
-        st.link_button("Sign in with Google", auth_url, use_container_width=True)
+        if st.button("Sign in with Google", use_container_width=True, type="primary"):
+            st.session_state["_do_login"] = True
+            st.rerun()
 
     st.markdown('<div class="login-note" style="text-align:center;">Only @fieldguide.io accounts are permitted.</div>', unsafe_allow_html=True)
 
@@ -1277,6 +1290,21 @@ def main():
         for msg in st.session_state.chat_messages:
             with st.chat_message(msg["role"]):
                 st.markdown(msg["content"])
+
+        # Show awaiting-input notification when Claude is ready
+        if not st.session_state.chat_messages or st.session_state.chat_messages[-1]["role"] == "assistant":
+            hint = (
+                "Describe an NPI change to get started..."
+                if not st.session_state.chat_messages
+                else "Awaiting your next input..."
+            )
+            st.markdown(
+                f'<div class="awaiting-input">'
+                f'<div class="pulse-dot"></div>'
+                f'<span class="awaiting-text">{hint}</span>'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
 
         if user_input := st.chat_input("e.g. 'We're adding bulk PDF export to the reporting module'…"):
             st.session_state.chat_messages.append({"role": "user", "content": user_input})
