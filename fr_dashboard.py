@@ -26,6 +26,36 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
+# ── Cookie manager (must render on every run, before anything else) ──
+_cookies = _cookie_mgr()
+
+# ── Restore session from cookie ──────────────────────────────────────
+if not st.session_state.get("_auth_user"):
+    _cookie_val = _cookies.get(_AUTH_COOKIE)
+    if _cookie_val:
+        _restored = _decode_auth(_cookie_val)
+        if _restored:
+            st.session_state["_auth_user"] = _restored
+
+# ── OAuth callback handler ───────────────────────────────────────────
+_qp = st.query_params
+if "code" in _qp:
+    with st.spinner("Signing you in…"):
+        _user, _err = _exchange_code(_qp.get("code", ""), _qp.get("state", ""))
+    if _err:
+        st.session_state["_auth_error"] = _err
+    else:
+        st.session_state["_auth_user"] = _user
+        _log_visit(_user)
+        _cookies.set(_AUTH_COOKIE, _encode_auth(_user),
+                     expires_at=datetime.now() + timedelta(hours=_COOKIE_TTL_HOURS))
+    st.query_params.clear()
+    st.rerun()
+
+if not st.session_state.get("_auth_user"):
+    _show_login_page()
+    st.stop()
+
 # ── Custom CSS (matches L2 dashboard styling) ────────────────
 st.markdown("""
 <style>
@@ -885,36 +915,6 @@ def resolve_col(key: str, df: pd.DataFrame):
 # ============================================================
 
 def main():
-    # ── Cookie manager (must render on every run) ─────────────
-    _cookies = _cookie_mgr()
-
-    # ── Restore session from cookie ───────────────────────────
-    if not st.session_state.get("_auth_user"):
-        _cookie_val = _cookies.get(_AUTH_COOKIE)
-        if _cookie_val:
-            _restored = _decode_auth(_cookie_val)
-            if _restored:
-                st.session_state["_auth_user"] = _restored
-
-    # ── OAuth callback ────────────────────────────────────────
-    _qp = st.query_params
-    if "code" in _qp and "state" in _qp:
-        with st.spinner("Signing you in…"):
-            _user, _err = _exchange_code(_qp["code"], _qp["state"])
-        if _err:
-            st.session_state["_auth_error"] = _err
-        else:
-            st.session_state["_auth_user"] = _user
-            _log_visit(_user)
-            _cookies.set(_AUTH_COOKIE, _encode_auth(_user),
-                         expires_at=datetime.now() + timedelta(hours=_COOKIE_TTL_HOURS))
-        st.query_params.clear()
-        st.rerun()
-
-    if not st.session_state.get("_auth_user"):
-        _show_login_page()
-        st.stop()
-
     # ── Header ───────────────────────────────────────────────
     app_dir = os.path.dirname(os.path.abspath(__file__))
     logo_path = os.path.join(app_dir, "logo.svg")
@@ -942,7 +942,7 @@ def main():
             st.markdown(f"`{_auth_user.get('email', '')}`")
             if st.button("Sign out", key="_logout_btn", use_container_width=True):
                 del st.session_state["_auth_user"]
-                _cookie_mgr().delete(_AUTH_COOKIE)
+                _cookies.delete(_AUTH_COOKIE)
                 st.rerun()
 
     # ── Sidebar ─────────────────────────────────────────────
