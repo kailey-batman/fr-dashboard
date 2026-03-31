@@ -908,7 +908,9 @@ if not st.session_state.get("_auth_user"):
     st.stop()
 
 # Refresh the auth cookie on every authenticated page load (keeps it alive for new tabs)
-_set_auth_cookie(st.session_state["_auth_user"])
+if not st.session_state.get("_cookie_set"):
+    _set_auth_cookie(st.session_state["_auth_user"])
+    st.session_state["_cookie_set"] = True
 
 
 # ============================================================
