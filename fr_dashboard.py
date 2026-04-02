@@ -12,6 +12,7 @@ import secrets
 import requests as _http
 import hmac
 import hashlib
+import re
 from datetime import datetime, timedelta
 import io
 
@@ -240,6 +241,8 @@ _GOOGLE_USERINFO_URL = "https://www.googleapis.com/oauth2/v3/userinfo"
 _OAUTH_SCOPES = "openid email profile"
 _ACCESS_LOG_TAB = "Access Log"
 _ACCESS_LOG_FILE = os.path.join(_APP_DIR, "access_log.json")
+_ACTIVITY_LOG_TAB = "Activity Log"
+_ACTIVITY_LOG_FILE = os.path.join(_APP_DIR, "activity_log.json")
 
 
 def _get_oauth_creds():
@@ -432,6 +435,109 @@ def _load_access_log():
         except Exception:
             pass
     return pd.DataFrame(columns=["Timestamp", "Email", "Name"])
+
+
+# ── Activity tracking helpers ────────────────────────────────────────────────
+
+def _log_session_start(user_info, session_id):
+    """Log a new session to the Activity Log sheet. Returns the sheet row number."""
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    entry = {
+        "session_id": session_id,
+        "email": user_info.get("email", ""),
+        "name": user_info.get("name", ""),
+        "start": now,
+        "last_active": now,
+        "duration_min": 0,
+    }
+    # Local JSON
+    try:
+        existing = []
+        if os.path.exists(_ACTIVITY_LOG_FILE):
+            with open(_ACTIVITY_LOG_FILE, "r") as f:
+                existing = json.load(f)
+        existing.append(entry)
+        with open(_ACTIVITY_LOG_FILE, "w") as f:
+            json.dump(existing, f, indent=2)
+    except Exception:
+        pass
+    # Google Sheets
+    try:
+        client = get_gsheet_client()
+        if client and SHEET_ID != "YOUR_SHEET_ID_HERE":
+            ss = client.open_by_key(SHEET_ID)
+            try:
+                ws = ss.worksheet(_ACTIVITY_LOG_TAB)
+            except Exception:
+                ws = ss.add_worksheet(title=_ACTIVITY_LOG_TAB, rows=5000, cols=6)
+                ws.append_row(["Session ID", "Email", "Name", "Start", "Last Active", "Duration (min)"])
+            result = ws.append_row([
+                session_id, entry["email"], entry["name"], now, now, "0"
+            ])
+            try:
+                updated_range = result["updates"]["updatedRange"]
+                row_num = int(re.search(r"A(\d+)", updated_range.split("!")[-1]).group(1))
+                return row_num
+            except Exception:
+                return None
+    except Exception:
+        pass
+    return None
+
+
+def _send_heartbeat(session_id, session_start, sheet_row):
+    """Update the Activity Log with current timestamp and duration."""
+    now = datetime.now()
+    now_str = now.strftime("%Y-%m-%d %H:%M:%S")
+    duration_min = round((now - session_start).total_seconds() / 60, 1)
+    # Update local JSON
+    try:
+        if os.path.exists(_ACTIVITY_LOG_FILE):
+            with open(_ACTIVITY_LOG_FILE, "r") as f:
+                existing = json.load(f)
+            for entry in existing:
+                if entry.get("session_id") == session_id:
+                    entry["last_active"] = now_str
+                    entry["duration_min"] = duration_min
+            with open(_ACTIVITY_LOG_FILE, "w") as f:
+                json.dump(existing, f, indent=2)
+    except Exception:
+        pass
+    # Update Google Sheets row
+    if sheet_row:
+        try:
+            client = get_gsheet_client()
+            if client and SHEET_ID != "YOUR_SHEET_ID_HERE":
+                ss = client.open_by_key(SHEET_ID)
+                ws = ss.worksheet(_ACTIVITY_LOG_TAB)
+                ws.update(f"E{sheet_row}:F{sheet_row}", [[now_str, str(duration_min)]])
+        except Exception:
+            pass
+
+
+def _load_activity_log():
+    """Return activity log as a DataFrame."""
+    try:
+        client = get_gsheet_client()
+        if client and SHEET_ID != "YOUR_SHEET_ID_HERE":
+            ss = client.open_by_key(SHEET_ID)
+            ws = ss.worksheet(_ACTIVITY_LOG_TAB)
+            rows = ws.get_all_records()
+            if rows:
+                return pd.DataFrame(rows)
+    except Exception:
+        pass
+    if os.path.exists(_ACTIVITY_LOG_FILE):
+        try:
+            with open(_ACTIVITY_LOG_FILE, "r") as f:
+                data = json.load(f)
+            if data:
+                df = pd.DataFrame(data)
+                df.columns = ["Session ID", "Email", "Name", "Start", "Last Active", "Duration (min)"]
+                return df
+        except Exception:
+            pass
+    return pd.DataFrame(columns=["Session ID", "Email", "Name", "Start", "Last Active", "Duration (min)"])
 
 
 # ============================================================
@@ -912,6 +1018,25 @@ if not st.session_state.get("_cookie_set"):
     _set_auth_cookie(st.session_state["_auth_user"])
     st.session_state["_cookie_set"] = True
 
+# ── Activity tracking (session start + heartbeat) ────────────────────────────
+if "_session_id" not in st.session_state:
+    st.session_state["_session_id"] = secrets.token_hex(8)
+    st.session_state["_session_start"] = datetime.now()
+    st.session_state["_last_heartbeat"] = datetime.now()
+    _row = _log_session_start(st.session_state["_auth_user"], st.session_state["_session_id"])
+    st.session_state["_activity_row"] = _row
+
+# Send heartbeat on each interaction (throttled to once per 55 seconds)
+_hb_now = datetime.now()
+_hb_last = st.session_state.get("_last_heartbeat", datetime.min)
+if (_hb_now - _hb_last).total_seconds() >= 55:
+    _send_heartbeat(
+        st.session_state["_session_id"],
+        st.session_state["_session_start"],
+        st.session_state.get("_activity_row"),
+    )
+    st.session_state["_last_heartbeat"] = _hb_now
+
 
 # ============================================================
 # MAIN APP
@@ -1383,6 +1508,100 @@ def main():
 
                 st.markdown("**Full login history**")
                 st.dataframe(log_df, use_container_width=True, hide_index=True)
+
+            # ── Activity Tracking ────────────────────────────────────────
+            st.divider()
+            st.subheader("Activity Tracking")
+            st.markdown("Session-level tracking: who visited, when, and for how long.")
+
+            activity_df = _load_activity_log()
+            if activity_df.empty:
+                st.info("No activity recorded yet. Activity is tracked automatically for authenticated users.")
+            else:
+                # Normalize columns
+                col_remap = {}
+                for c in activity_df.columns:
+                    cl = c.lower().replace(" ", "_").replace("(", "").replace(")", "")
+                    if "session" in cl:
+                        col_remap[c] = "Session ID"
+                    elif "email" in cl:
+                        col_remap[c] = "Email"
+                    elif "name" in cl and "session" not in cl:
+                        col_remap[c] = "Name"
+                    elif "start" in cl:
+                        col_remap[c] = "Start"
+                    elif "last" in cl:
+                        col_remap[c] = "Last Active"
+                    elif "duration" in cl:
+                        col_remap[c] = "Duration (min)"
+                activity_df = activity_df.rename(columns=col_remap)
+
+                if "Last Active" in activity_df.columns:
+                    activity_df["Last Active"] = pd.to_datetime(activity_df["Last Active"], errors="coerce")
+                if "Start" in activity_df.columns:
+                    activity_df["Start"] = pd.to_datetime(activity_df["Start"], errors="coerce")
+                if "Duration (min)" in activity_df.columns:
+                    activity_df["Duration (min)"] = pd.to_numeric(activity_df["Duration (min)"], errors="coerce")
+
+                # Currently active users (heartbeat within last 2 minutes)
+                if "Last Active" in activity_df.columns:
+                    now = datetime.now()
+                    active = activity_df[activity_df["Last Active"] >= now - timedelta(minutes=2)]
+                    st.markdown("**Currently active**")
+                    if active.empty:
+                        st.caption("No users currently active.")
+                    else:
+                        for _, row in active.iterrows():
+                            label = row.get("Name") or row.get("Email", "Unknown")
+                            dur = row.get("Duration (min)", 0)
+                            st.markdown(f"🟢 **{label}** — active for {dur:.0f} min")
+
+                st.divider()
+
+                # Summary metrics
+                total_sessions = len(activity_df)
+                unique_visitors = activity_df["Email"].nunique() if "Email" in activity_df.columns else 0
+                avg_duration = activity_df["Duration (min)"].mean() if "Duration (min)" in activity_df.columns else 0
+                m1, m2, m3 = st.columns(3)
+                m1.metric("Total sessions", total_sessions)
+                m2.metric("Unique visitors", unique_visitors)
+                m3.metric("Avg duration (min)", f"{avg_duration:.1f}")
+
+                st.divider()
+
+                # Per-user usage breakdown
+                if "Email" in activity_df.columns and "Duration (min)" in activity_df.columns:
+                    st.markdown("**Usage per user**")
+                    la_col = "Last Active" if "Last Active" in activity_df.columns else "Start"
+                    user_stats = (
+                        activity_df.groupby("Email")
+                        .agg(
+                            Sessions=("Email", "count"),
+                            Total_min=("Duration (min)", "sum"),
+                            Avg_min=("Duration (min)", "mean"),
+                            Last_visit=(la_col, "max"),
+                        )
+                        .reset_index()
+                        .rename(columns={"Total_min": "Total (min)", "Avg_min": "Avg (min)", "Last_visit": "Last visit"})
+                        .sort_values("Total (min)", ascending=False)
+                    )
+                    user_stats["Total (min)"] = user_stats["Total (min)"].round(1)
+                    user_stats["Avg (min)"] = user_stats["Avg (min)"].round(1)
+                    if "Last visit" in user_stats.columns:
+                        user_stats["Last visit"] = user_stats["Last visit"].dt.strftime("%Y-%m-%d %H:%M:%S")
+                    st.dataframe(user_stats, use_container_width=True, hide_index=True)
+                    st.divider()
+
+                # Full session history
+                st.markdown("**Full session history**")
+                display_df = activity_df.sort_values("Start", ascending=False).reset_index(drop=True) if "Start" in activity_df.columns else activity_df
+                fmt_df = display_df.copy()
+                for col in ["Start", "Last Active"]:
+                    if col in fmt_df.columns:
+                        fmt_df[col] = fmt_df[col].dt.strftime("%Y-%m-%d %H:%M:%S")
+                if "Duration (min)" in fmt_df.columns:
+                    fmt_df["Duration (min)"] = fmt_df["Duration (min)"].round(1)
+                st.dataframe(fmt_df, use_container_width=True, hide_index=True)
 
 
 if __name__ == "__main__":
