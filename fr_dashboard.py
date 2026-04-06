@@ -731,6 +731,7 @@ def get_anthropic_client():
 # CONTACT EXTRACTION
 # ============================================================
 
+@st.cache_data(ttl=120)
 def load_contacts() -> dict:
     sheet = _get_results_sheet()
     if sheet is None:
@@ -938,7 +939,10 @@ def _run_contact_extraction_thread(df: pd.DataFrame, ai: anthropic.Anthropic):
             json.dump({"done": done, "total": total, "running": True}, f)
 
     with open(CONTACTS_PROGRESS_FILE, "w") as f:
-        json.dump({"done": total, "total": total, "running": False}, f)
+        json.dump({"done": total, "total": total, "running": False,
+                   "completed_at": datetime.now().isoformat()}, f)
+    # Clear cache so next page load picks up new data
+    load_contacts.clear()
 
 
 def start_contact_extraction(df: pd.DataFrame, ai: anthropic.Anthropic):
@@ -954,6 +958,7 @@ def start_contact_extraction(df: pd.DataFrame, ai: anthropic.Anthropic):
 # TICKET SUMMARY EXTRACTION (cached, incremental)
 # ============================================================
 
+@st.cache_data(ttl=120)
 def load_summaries() -> dict:
     sheet = _get_results_sheet()
     if sheet is None:
@@ -1073,7 +1078,10 @@ def _run_summary_extraction_thread(df: pd.DataFrame, ai: anthropic.Anthropic):
             json.dump({"done": done, "total": total, "running": True}, f)
 
     with open(SUMMARIES_PROGRESS_FILE, "w") as f:
-        json.dump({"done": total, "total": total, "running": False}, f)
+        json.dump({"done": total, "total": total, "running": False,
+                   "completed_at": datetime.now().isoformat()}, f)
+    # Clear cache so next page load picks up new data
+    load_summaries.clear()
 
 
 def start_summary_extraction(df: pd.DataFrame, ai: anthropic.Anthropic):
@@ -1341,32 +1349,42 @@ def main():
     with st.spinner("Loading feature requests…"):
         df = load_feature_requests()
 
-    # ── Load contacts + auto-start extraction if needed ─────
+    # ── Load contacts + summaries ────────────────────────────
     contacts = load_contacts()
     progress = load_contacts_progress()
-    ai = get_anthropic_client()
-
-    # Count unanalyzed tickets (fast set operation)
-    id_col_name = COLUMNS.get("id", "id")
-    _unanalyzed_count = 0
-    if not df.empty:
-        all_ids = set(df[id_col_name].astype(str))
-        _unanalyzed_count = len(all_ids - set(contacts.keys()))
-
-    # Summary extraction (cached, incremental)
     summaries = load_summaries()
     sum_progress = load_summaries_progress()
+    ai = get_anthropic_client()
 
-    if not df.empty and ai:
-        unsummarized_ids = all_ids - set(summaries.keys())
-        if unsummarized_ids and not sum_progress.get("running"):
-            start_summary_extraction(df, ai)
-            sum_progress = {"running": True, "done": 0, "total": len(unsummarized_ids)}
+    id_col_name = COLUMNS.get("id", "id")
+    all_ids = set(df[id_col_name].astype(str)) if not df.empty else set()
+
+    # Helper: check if extraction completed recently (within 1 hour)
+    def _recently_completed(prog):
+        completed_at = prog.get("completed_at")
+        if not completed_at:
+            return False
+        try:
+            return (datetime.now() - datetime.fromisoformat(completed_at)).total_seconds() < 3600
+        except Exception:
+            return False
+
+    # Auto-start contact extraction if needed
+    _unanalyzed_count = len(all_ids - set(contacts.keys())) if all_ids else 0
+    if _unanalyzed_count > 0 and ai and not progress.get("running") and not _recently_completed(progress):
+        start_contact_extraction(df, ai)
+        progress = {"running": True, "done": 0, "total": _unanalyzed_count}
+
+    # Auto-start summary extraction if needed
+    _unsummarized_count = len(all_ids - set(summaries.keys())) if all_ids else 0
+    if _unsummarized_count > 0 and ai and not sum_progress.get("running") and not _recently_completed(sum_progress):
+        start_summary_extraction(df, ai)
+        sum_progress = {"running": True, "done": 0, "total": _unsummarized_count}
 
     any_running = progress.get("running") or sum_progress.get("running")
     if any_running:
         from streamlit_autorefresh import st_autorefresh
-        st_autorefresh(interval=4000, key="analysis_refresh")
+        st_autorefresh(interval=8000, key="analysis_refresh")
 
     if progress.get("running"):
         done  = progress.get("done", 0)
@@ -1377,9 +1395,6 @@ def main():
         </div>
         """, unsafe_allow_html=True)
         st.progress(done / total if total > 0 else 0)
-    elif _unanalyzed_count > 0 and ai:
-        if st.button(f"Analyze {_unanalyzed_count} new tickets", type="primary"):
-            start_contact_extraction(df, ai)
 
     if sum_progress.get("running"):
         done  = sum_progress.get("done", 0)
