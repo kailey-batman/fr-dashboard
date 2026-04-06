@@ -731,8 +731,8 @@ def get_anthropic_client():
 # CONTACT EXTRACTION
 # ============================================================
 
-@st.cache_data(ttl=120)
-def load_contacts() -> dict:
+def _load_contacts_from_sheet() -> dict:
+    """Read contacts from Google Sheet. Safe to call from threads."""
     sheet = _get_results_sheet()
     if sheet is None:
         return {}
@@ -753,8 +753,15 @@ def load_contacts() -> dict:
                     "role": r.get("role") or None,
                 }
         return result
-    except Exception:
+    except Exception as e:
+        print(f"[load_contacts] Error: {e}")
         return {}
+
+
+@st.cache_data(ttl=120)
+def load_contacts() -> dict:
+    """Cached wrapper for main Streamlit thread."""
+    return _load_contacts_from_sheet()
 
 
 def save_contacts(contacts: dict):
@@ -788,6 +795,7 @@ def append_contacts(batch_contacts: dict):
     with _contacts_lock:
         sheet = _get_results_sheet()
         if sheet is None:
+            print("[append_contacts] No results sheet available")
             return
         try:
             ws = _get_or_create_worksheet(
@@ -805,8 +813,8 @@ def append_contacts(batch_contacts: dict):
                 ])
             if rows:
                 ws.append_rows(rows, value_input_option="RAW")
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[append_contacts] Error: {e}")
 
 
 def load_contacts_progress() -> dict:
@@ -889,7 +897,8 @@ No other text."""
 
 
 def _run_contact_extraction_thread(df: pd.DataFrame, ai: anthropic.Anthropic):
-    contacts = load_contacts()
+    contacts = _load_contacts_from_sheet()
+    existing_ids = set(contacts.keys())
     id_col    = COLUMNS.get("id", "id")
     title_col = COLUMNS.get("title", "name")
     desc_col  = COLUMNS.get("description", "description")
@@ -897,6 +906,7 @@ def _run_contact_extraction_thread(df: pd.DataFrame, ai: anthropic.Anthropic):
 
     # Stage 1: instant heuristic pre-filter
     to_analyze = []
+    heuristic_batch = {}
     for _, row in df.iterrows():
         ticket_id   = str(row.get(id_col, ""))
         if ticket_id in contacts:
@@ -906,12 +916,13 @@ def _run_contact_extraction_thread(df: pd.DataFrame, ai: anthropic.Anthropic):
         requester   = str(row.get(req_col, ""))
 
         if _is_internal_heuristic(requester, description):
-            contacts[ticket_id] = {"is_customer_ticket": False, "name": None, "company": None, "role": None}
+            entry = {"is_customer_ticket": False, "name": None, "company": None, "role": None}
+            contacts[ticket_id] = entry
+            heuristic_batch[ticket_id] = entry
         else:
             to_analyze.append({"id": ticket_id, "title": title, "description": description, "requester": requester})
 
     # Save heuristic results immediately so the UI updates fast
-    heuristic_batch = {tid: c for tid, c in contacts.items() if tid not in load_contacts()}
     if heuristic_batch:
         append_contacts(heuristic_batch)
     total = len(to_analyze)
@@ -958,8 +969,8 @@ def start_contact_extraction(df: pd.DataFrame, ai: anthropic.Anthropic):
 # TICKET SUMMARY EXTRACTION (cached, incremental)
 # ============================================================
 
-@st.cache_data(ttl=120)
-def load_summaries() -> dict:
+def _load_summaries_from_sheet() -> dict:
+    """Read summaries from Google Sheet. Safe to call from threads."""
     sheet = _get_results_sheet()
     if sheet is None:
         return {}
@@ -967,8 +978,15 @@ def load_summaries() -> dict:
         ws = _get_or_create_worksheet(sheet, SUMMARIES_TAB, ["ticket_id", "summary"])
         rows = ws.get_all_records()
         return {str(r.get("ticket_id", "")): r.get("summary", "") for r in rows if r.get("ticket_id")}
-    except Exception:
+    except Exception as e:
+        print(f"[load_summaries] Error: {e}")
         return {}
+
+
+@st.cache_data(ttl=120)
+def load_summaries() -> dict:
+    """Cached wrapper for main Streamlit thread."""
+    return _load_summaries_from_sheet()
 
 
 def save_summaries(summaries: dict):
@@ -993,14 +1011,15 @@ def append_summaries(batch_summaries: dict):
     with _summaries_lock:
         sheet = _get_results_sheet()
         if sheet is None:
+            print("[append_summaries] No results sheet available")
             return
         try:
             ws = _get_or_create_worksheet(sheet, SUMMARIES_TAB, ["ticket_id", "summary"])
             rows = [[tid, summary] for tid, summary in batch_summaries.items()]
             if rows:
                 ws.append_rows(rows, value_input_option="RAW")
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[append_summaries] Error: {e}")
 
 
 def load_summaries_progress() -> dict:
@@ -1046,7 +1065,7 @@ No other text."""
 
 
 def _run_summary_extraction_thread(df: pd.DataFrame, ai: anthropic.Anthropic):
-    summaries = load_summaries()
+    summaries = _load_summaries_from_sheet()
     id_col = COLUMNS.get("id", "id")
     title_col = COLUMNS.get("title", "name")
     desc_col = COLUMNS.get("description", "description")
