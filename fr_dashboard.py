@@ -79,22 +79,15 @@ st.markdown("""
     .cat-stat-card .cat-name { color: #00E676; font-weight: 600; font-size: 0.9rem; }
     .cat-stat-card .cat-detail { color: #9E9E9E; font-size: 0.8rem; }
 
-    /* Top-bar: fixed row aligned with Streamlit's toolbar */
+    /* Top-bar: email pinned next to Streamlit toolbar */
     .top-bar {
-        position: fixed; top: 6px; right: 50px; z-index: 999;
-        display: flex; align-items: center; gap: 8px;
+        position: fixed; top: 9px; right: 48px; z-index: 1000;
+        display: flex; align-items: center; gap: 6px;
+        pointer-events: none;
     }
     .top-bar-email {
-        color: #9E9E9E; font-size: 0.82rem; margin-right: 4px;
+        color: #9E9E9E; font-size: 0.8rem; font-weight: 500;
     }
-    .top-bar-btn {
-        background: #373E47; border: 1px solid #444C56; color: #E0E0E0;
-        border-radius: 6px; padding: 4px 12px; font-size: 0.8rem; cursor: pointer;
-    }
-    .top-bar-btn:hover { background: #444C56; color: #fff; }
-
-    /* Hide the default Streamlit top padding to make room */
-    .block-container { padding-top: 2rem !important; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -1149,26 +1142,65 @@ if (_hb_now - _hb_last).total_seconds() >= 55:
 # ============================================================
 
 def main():
-    # ── Fixed top-right bar (aligned with Streamlit toolbar) ───
+    # ── Handle menu actions via query params ──────────────────
+    _qp = st.query_params
+    if _qp.get("action") == "refresh":
+        st.query_params.clear()
+        st.cache_data.clear()
+        st.rerun()
+    elif _qp.get("action") == "signout":
+        st.query_params.clear()
+        if "_auth_user" in st.session_state:
+            del st.session_state["_auth_user"]
+        _clear_auth_cookie()
+        st.rerun()
+
+    # ── Email in top-right + inject menu items via JS ─────────
     _auth_user = st.session_state.get("_auth_user", {})
     _user_email = _auth_user.get("email", "")
     st.markdown(f"""
     <div class="top-bar">
         <span class="top-bar-email">{_user_email}</span>
     </div>
+    <script>
+    // Inject Refresh / Sign Out into Streamlit's three-dot menu
+    (function() {{
+        const ITEMS = [
+            {{label: '🔄 Refresh Data', action: 'refresh'}},
+            {{label: '🚪 Sign Out', action: 'signout'}},
+        ];
+        function inject(menuList) {{
+            if (menuList.querySelector('.custom-menu-item')) return;
+            const sep = document.createElement('hr');
+            sep.style.cssText = 'border:none;border-top:1px solid #444C56;margin:4px 0;';
+            menuList.prepend(sep);
+            ITEMS.slice().reverse().forEach(item => {{
+                const li = document.createElement('li');
+                li.className = 'custom-menu-item';
+                li.setAttribute('role', 'option');
+                li.style.cssText = 'padding:0.25rem 0.75rem;cursor:pointer;color:#E0E0E0;font-size:0.875rem;list-style:none;';
+                li.textContent = item.label;
+                li.onmouseenter = function() {{ this.style.backgroundColor='#444C56'; }};
+                li.onmouseleave = function() {{ this.style.backgroundColor=''; }};
+                li.onclick = function() {{
+                    window.location.search = '?action=' + item.action;
+                }};
+                menuList.prepend(li);
+            }});
+        }}
+        new MutationObserver(function(mutations) {{
+            for (const m of mutations) {{
+                for (const node of m.addedNodes) {{
+                    if (node.nodeType === 1) {{
+                        const ul = node.querySelector ? node.querySelector('[data-testid="main-menu-list"]') || node.querySelector('ul[role="listbox"]') : null;
+                        if (ul) inject(ul);
+                    }}
+                }}
+            }}
+        }}).observe(document.body, {{childList: true, subtree: true}});
+    }})();
+    </script>
     """, unsafe_allow_html=True)
-
-    # Hidden buttons wired to the top-bar actions
-    _tb1, _tb2, _tb_spacer = st.columns([1, 1, 6])
-    with _tb1:
-        if st.button("🔄 Refresh Data", key="_refresh_btn"):
-            st.cache_data.clear()
-            st.rerun()
-    with _tb2:
-        if st.button("Sign out", key="_logout_btn"):
-            del st.session_state["_auth_user"]
-            _clear_auth_cookie()
-            st.rerun()
 
     # ── Header: logo + title ─────────────────────────────────
     app_dir = os.path.dirname(os.path.abspath(__file__))
