@@ -170,11 +170,11 @@ def _get_or_create_worksheet(sheet, tab_name, headers):
             if not first_row:
                 ws.insert_row(headers, 1)
             else:
-                ws.update('A1', [headers])
+                ws.update(values=[headers], range_name='A1')
         return ws
     except gspread.exceptions.WorksheetNotFound:
         ws = sheet.add_worksheet(title=tab_name, rows=1, cols=len(headers))
-        ws.update('A1', [headers])
+        ws.update(values=[headers], range_name='A1')
         return ws
 
 
@@ -618,7 +618,7 @@ def _send_heartbeat(session_id, session_start, sheet_row):
             if client and SHEET_ID != "YOUR_SHEET_ID_HERE":
                 ss = client.open_by_key(SHEET_ID)
                 ws = ss.worksheet(_ACTIVITY_LOG_TAB)
-                ws.update(f"E{sheet_row}:F{sheet_row}", [[now_str, str(duration_min)]])
+                ws.update(values=[[now_str, str(duration_min)]], range_name=f"E{sheet_row}:F{sheet_row}")
         except Exception:
             pass
 
@@ -851,7 +851,7 @@ def save_contacts(contacts: dict):
                     c.get("role") or "",
                 ])
             ws.clear()
-            ws.update(rows, value_input_option="RAW")
+            ws.update(values=rows, value_input_option="RAW")
         except Exception as e:
             print(f"[save_contacts] Error: {e}")
 
@@ -1069,7 +1069,7 @@ def save_summaries(summaries: dict):
             for tid, summary in summaries.items():
                 rows.append([tid, summary])
             ws.clear()
-            ws.update(rows, value_input_option="RAW")
+            ws.update(values=rows, value_input_option="RAW")
         except Exception as e:
             print(f"[save_summaries] Error: {e}")
 
