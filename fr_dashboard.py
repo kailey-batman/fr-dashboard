@@ -142,16 +142,41 @@ DISPLAY_KEYS = ["id", "title", "link", "timestamp", "submitter", "contact", "pro
 # Max tickets sent to the chatbot as context
 CHATBOT_MAX_TICKETS = None  # No limit — include all tickets
 
-# Persistent data directory — use Railway volume mount if available, else local
-_DATA_DIR = "/data" if os.path.isdir("/data") else _APP_DIR
-CONTACTS_FILE = os.path.join(_DATA_DIR, "contacts.json")
-CONTACTS_PROGRESS_FILE = os.path.join(_DATA_DIR, "contacts_progress.json")
-SUMMARIES_FILE = os.path.join(_DATA_DIR, "fr_summaries.json")
-SUMMARIES_PROGRESS_FILE = os.path.join(_DATA_DIR, "fr_summaries_progress.json")
+# Google Sheet for persisting analysis results (contacts, summaries)
+RESULTS_SHEET_ID = os.environ.get(
+    "RESULTS_SHEET_ID", "1HEnsocy6vwjA9Wgb1ZsUsDmmtwDNKKNIDTDP1YLKSEg"
+)
+CONTACTS_TAB = "Contacts"
+SUMMARIES_TAB = "Summaries"
+
+# Progress files are ephemeral (local only, ok to lose on deploy)
+CONTACTS_PROGRESS_FILE = os.path.join(_APP_DIR, "contacts_progress.json")
+SUMMARIES_PROGRESS_FILE = os.path.join(_APP_DIR, "fr_summaries_progress.json")
 SUMMARY_BATCH_SIZE = 20
 
 _contacts_lock = threading.Lock()
 _summaries_lock = threading.Lock()
+
+
+def _get_or_create_worksheet(sheet, tab_name, headers):
+    """Get a worksheet by name, creating it with headers if it doesn't exist."""
+    try:
+        return sheet.worksheet(tab_name)
+    except gspread.exceptions.WorksheetNotFound:
+        ws = sheet.add_worksheet(title=tab_name, rows=1, cols=len(headers))
+        ws.append_row(headers)
+        return ws
+
+
+def _get_results_sheet():
+    """Return the results Google Sheet (cached)."""
+    client = get_gsheet_client()
+    if client is None:
+        return None
+    try:
+        return client.open_by_key(RESULTS_SHEET_ID)
+    except Exception:
+        return None
 
 # ============================================================
 # GOOGLE SHEETS AUTH
@@ -707,19 +732,80 @@ def get_anthropic_client():
 # ============================================================
 
 def load_contacts() -> dict:
-    if os.path.exists(CONTACTS_FILE):
-        try:
-            with open(CONTACTS_FILE, "r") as f:
-                return json.load(f)
-        except Exception:
-            pass
-    return {}
+    sheet = _get_results_sheet()
+    if sheet is None:
+        return {}
+    try:
+        ws = _get_or_create_worksheet(
+            sheet, CONTACTS_TAB,
+            ["ticket_id", "is_customer_ticket", "name", "company", "role"],
+        )
+        rows = ws.get_all_records()
+        result = {}
+        for r in rows:
+            tid = str(r.get("ticket_id", ""))
+            if tid:
+                result[tid] = {
+                    "is_customer_ticket": str(r.get("is_customer_ticket", "True")).lower() == "true",
+                    "name": r.get("name") or None,
+                    "company": r.get("company") or None,
+                    "role": r.get("role") or None,
+                }
+        return result
+    except Exception:
+        return {}
 
 
 def save_contacts(contacts: dict):
+    """Full rewrite — use only at end of extraction, not per-batch."""
     with _contacts_lock:
-        with open(CONTACTS_FILE, "w") as f:
-            json.dump(contacts, f)
+        sheet = _get_results_sheet()
+        if sheet is None:
+            return
+        try:
+            ws = _get_or_create_worksheet(
+                sheet, CONTACTS_TAB,
+                ["ticket_id", "is_customer_ticket", "name", "company", "role"],
+            )
+            rows = [["ticket_id", "is_customer_ticket", "name", "company", "role"]]
+            for tid, c in contacts.items():
+                rows.append([
+                    tid,
+                    str(c.get("is_customer_ticket", True)),
+                    c.get("name") or "",
+                    c.get("company") or "",
+                    c.get("role") or "",
+                ])
+            ws.clear()
+            ws.update(rows, value_input_option="RAW")
+        except Exception:
+            pass
+
+
+def append_contacts(batch_contacts: dict):
+    """Append a batch of contacts as new rows (fast, no full rewrite)."""
+    with _contacts_lock:
+        sheet = _get_results_sheet()
+        if sheet is None:
+            return
+        try:
+            ws = _get_or_create_worksheet(
+                sheet, CONTACTS_TAB,
+                ["ticket_id", "is_customer_ticket", "name", "company", "role"],
+            )
+            rows = []
+            for tid, c in batch_contacts.items():
+                rows.append([
+                    tid,
+                    str(c.get("is_customer_ticket", True)),
+                    c.get("name") or "",
+                    c.get("company") or "",
+                    c.get("role") or "",
+                ])
+            if rows:
+                ws.append_rows(rows, value_input_option="RAW")
+        except Exception:
+            pass
 
 
 def load_contacts_progress() -> dict:
@@ -824,7 +910,9 @@ def _run_contact_extraction_thread(df: pd.DataFrame, ai: anthropic.Anthropic):
             to_analyze.append({"id": ticket_id, "title": title, "description": description, "requester": requester})
 
     # Save heuristic results immediately so the UI updates fast
-    save_contacts(contacts)
+    heuristic_batch = {tid: c for tid, c in contacts.items() if tid not in load_contacts()}
+    if heuristic_batch:
+        append_contacts(heuristic_batch)
     total = len(to_analyze)
 
     # Stage 2: batch AI analysis for borderline tickets
@@ -832,21 +920,23 @@ def _run_contact_extraction_thread(df: pd.DataFrame, ai: anthropic.Anthropic):
         batch = to_analyze[batch_start: batch_start + ANALYSIS_BATCH_SIZE]
         results = _analyze_batch(ai, batch)
 
+        batch_results = {}
         for r in results:
             tid = str(r.get("id", ""))
-            contacts[tid] = {
+            c = {
                 "is_customer_ticket": r.get("is_customer_ticket", True),
                 "name":    r.get("name"),
                 "company": r.get("company"),
                 "role":    r.get("role"),
             }
+            contacts[tid] = c
+            batch_results[tid] = c
 
         done = batch_start + len(batch)
-        save_contacts(contacts)
+        append_contacts(batch_results)
         with open(CONTACTS_PROGRESS_FILE, "w") as f:
             json.dump({"done": done, "total": total, "running": True}, f)
 
-    save_contacts(contacts)
     with open(CONTACTS_PROGRESS_FILE, "w") as f:
         json.dump({"done": total, "total": total, "running": False}, f)
 
@@ -865,19 +955,47 @@ def start_contact_extraction(df: pd.DataFrame, ai: anthropic.Anthropic):
 # ============================================================
 
 def load_summaries() -> dict:
-    if os.path.exists(SUMMARIES_FILE):
-        try:
-            with open(SUMMARIES_FILE, "r") as f:
-                return json.load(f)
-        except Exception:
-            pass
-    return {}
+    sheet = _get_results_sheet()
+    if sheet is None:
+        return {}
+    try:
+        ws = _get_or_create_worksheet(sheet, SUMMARIES_TAB, ["ticket_id", "summary"])
+        rows = ws.get_all_records()
+        return {str(r.get("ticket_id", "")): r.get("summary", "") for r in rows if r.get("ticket_id")}
+    except Exception:
+        return {}
 
 
 def save_summaries(summaries: dict):
+    """Full rewrite — use only at end of extraction, not per-batch."""
     with _summaries_lock:
-        with open(SUMMARIES_FILE, "w") as f:
-            json.dump(summaries, f)
+        sheet = _get_results_sheet()
+        if sheet is None:
+            return
+        try:
+            ws = _get_or_create_worksheet(sheet, SUMMARIES_TAB, ["ticket_id", "summary"])
+            rows = [["ticket_id", "summary"]]
+            for tid, summary in summaries.items():
+                rows.append([tid, summary])
+            ws.clear()
+            ws.update(rows, value_input_option="RAW")
+        except Exception:
+            pass
+
+
+def append_summaries(batch_summaries: dict):
+    """Append a batch of summaries as new rows (fast, no full rewrite)."""
+    with _summaries_lock:
+        sheet = _get_results_sheet()
+        if sheet is None:
+            return
+        try:
+            ws = _get_or_create_worksheet(sheet, SUMMARIES_TAB, ["ticket_id", "summary"])
+            rows = [[tid, summary] for tid, summary in batch_summaries.items()]
+            if rows:
+                ws.append_rows(rows, value_input_option="RAW")
+        except Exception:
+            pass
 
 
 def load_summaries_progress() -> dict:
@@ -944,14 +1062,16 @@ def _run_summary_extraction_thread(df: pd.DataFrame, ai: anthropic.Anthropic):
     for batch_start in range(0, total, SUMMARY_BATCH_SIZE):
         batch = to_summarize[batch_start: batch_start + SUMMARY_BATCH_SIZE]
         results = _summarize_batch(ai, batch)
+        batch_results = {}
         for r in results:
-            summaries[str(r.get("id", ""))] = r.get("summary", "")
+            tid = str(r.get("id", ""))
+            summaries[tid] = r.get("summary", "")
+            batch_results[tid] = r.get("summary", "")
         done = batch_start + len(batch)
-        save_summaries(summaries)
+        append_summaries(batch_results)
         with open(SUMMARIES_PROGRESS_FILE, "w") as f:
             json.dump({"done": done, "total": total, "running": True}, f)
 
-    save_summaries(summaries)
     with open(SUMMARIES_PROGRESS_FILE, "w") as f:
         json.dump({"done": total, "total": total, "running": False}, f)
 
