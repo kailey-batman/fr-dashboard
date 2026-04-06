@@ -1132,47 +1132,41 @@ if (_hb_now - _hb_last).total_seconds() >= 55:
 # ============================================================
 
 def main():
-    # ── Header ───────────────────────────────────────────────
+    # ── Header row: logo + title | refresh + user ─────────────
     app_dir = os.path.dirname(os.path.abspath(__file__))
     logo_path = os.path.join(app_dir, "logo.svg")
-    if os.path.exists(logo_path):
-        with open(logo_path, "r") as f:
-            logo_svg = f.read()
-        logo_b64 = base64.b64encode(logo_svg.encode()).decode()
-        st.markdown(f"""
-        <div class="header-container">
-            <img src="data:image/svg+xml;base64,{logo_b64}" />
-            <h1>Feature Request Dashboard</h1>
-        </div>
-        """, unsafe_allow_html=True)
-    else:
-        st.markdown('<h1 style="color:#00E676;">Feature Request Dashboard</h1>', unsafe_allow_html=True)
-
-    st.markdown('<div class="header-subtitle">Customer feature requests from Shortcut · NPI impact analysis</div>', unsafe_allow_html=True)
-
-    # ── Logged-in user bar ────────────────────────────────────
     _auth_user = st.session_state.get("_auth_user", {})
-    _col_spacer, _col_user = st.columns([6, 1])
-    with _col_user:
-        with st.popover(f"👤 {_auth_user.get('email', '')}", use_container_width=True):
-            st.markdown(f"**{_auth_user.get('name', '')}**")
-            st.markdown(f"`{_auth_user.get('email', '')}`")
-            if st.button("Sign out", key="_logout_btn", use_container_width=True):
-                del st.session_state["_auth_user"]
-                _clear_auth_cookie()
-                st.rerun()
 
-    # ── Sidebar ─────────────────────────────────────────────
-    with st.sidebar:
+    hdr_left, hdr_right = st.columns([4, 1])
+    with hdr_left:
         if os.path.exists(logo_path):
-            st.image(logo_path, width=60)
-        st.markdown("---")
-        st.markdown("### Data")
-        if st.button("🔄 Refresh Data", use_container_width=True):
-            st.cache_data.clear()
-            st.rerun()
-        st.markdown("---")
-        st.caption(f"Last loaded: {datetime.now().strftime('%H:%M:%S')}")
+            with open(logo_path, "r") as f:
+                logo_svg = f.read()
+            logo_b64 = base64.b64encode(logo_svg.encode()).decode()
+            st.markdown(f"""
+            <div class="header-container">
+                <img src="data:image/svg+xml;base64,{logo_b64}" />
+                <h1>Feature Request Dashboard</h1>
+            </div>
+            """, unsafe_allow_html=True)
+        else:
+            st.markdown('<h1 style="color:#00E676;">Feature Request Dashboard</h1>', unsafe_allow_html=True)
+        st.markdown('<div class="header-subtitle">Customer feature requests from Shortcut · NPI impact analysis</div>', unsafe_allow_html=True)
+
+    with hdr_right:
+        r1, r2 = st.columns(2)
+        with r1:
+            if st.button("🔄 Refresh", use_container_width=True):
+                st.cache_data.clear()
+                st.rerun()
+        with r2:
+            with st.popover(f"👤 {_auth_user.get('email', '')}", use_container_width=True):
+                st.markdown(f"**{_auth_user.get('name', '')}**")
+                st.markdown(f"`{_auth_user.get('email', '')}`")
+                if st.button("Sign out", key="_logout_btn", use_container_width=True):
+                    del st.session_state["_auth_user"]
+                    _clear_auth_cookie()
+                    st.rerun()
 
     # ── Load data ────────────────────────────────────────────
     with st.spinner("Loading feature requests…"):
@@ -1248,27 +1242,6 @@ def main():
                     return False  # not yet analyzed — keep it
                 return c.get("is_customer_ticket") is False
             df = df[~df.apply(_is_not_customer, axis=1)]
-
-    # ── Debug expander (sidebar, safe to render after df loaded) ─
-    with st.sidebar:
-        with st.expander("🔧 Debug", expanded=False):
-            if not df.empty and "custom_fields" in df.columns:
-                sample = df["custom_fields"].dropna().astype(str)
-                sample = sample[sample.str.strip().str.len() > 5]
-                if not sample.empty:
-                    st.text("Raw custom_fields (first row):")
-                    st.code(sample.iloc[0][:800])
-                    st.text("Parsed keys + values (first row):")
-                    st.json(_parse_custom_fields_text(sample.iloc[0]))
-                    st.text("All unique keys across first 20 rows:")
-                    all_keys = set()
-                    for raw in sample.head(20):
-                        all_keys.update(_parse_custom_fields_text(raw).keys())
-                    st.write(sorted(all_keys))
-                else:
-                    st.text("custom_fields is empty for all rows.")
-            elif df.empty:
-                st.text("No data loaded.")
 
     # ── Tabs ─────────────────────────────────────────────────
     _admin_mode = _is_admin()
