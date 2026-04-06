@@ -1050,24 +1050,18 @@ You have access to {ticket_count} customer feature request ticket(s). When the u
 
 ## Your Job
 
-When the user describes an NPI change, respond with:
+When the user describes an NPI change, respond with ONLY a JSON object — no markdown, no explanation, no code fences. The JSON must have this exact structure:
 
-1. **Brief restatement** of the NPI change as you understand it (one sentence).
+{{"summary": "1-2 sentence summary of how much demand this NPI covers and any major unaddressed themes", "tickets": [{{"id": "<ticket id>", "relevance": "Direct|Partial|Related", "reason": "one sentence why"}}]}}
 
-2. **Directly Addressed (N tickets):** — tickets the NPI change fully or substantially fulfills.
-   - #[number] **[Title]** — [one sentence explaining why this NPI addresses it] | Contact: [name if known]
-
-3. **Potentially Impacted (N tickets):** — tickets in the same area that may be partially addressed, affected, or made obsolete.
-   - #[number] **[Title]** — [one sentence on the impact] | Contact: [name if known]
-
-4. **Related Context (N tickets):** — tickets in adjacent areas worth considering together.
-   - #[number] **[Title]** — [one sentence on the connection]
-
-5. **Summary** — 2–3 sentences: how much existing customer demand does this NPI cover? Are there major unaddressed themes?
-
-**Be thorough.** Include borderline tickets and note your uncertainty. Err on the side of inclusion.
-
-For follow-up questions, answer conversationally using the ticket data above."""
+Rules:
+- "Direct" = the NPI fully or substantially fulfills the request
+- "Partial" = the NPI partially addresses or affects the request
+- "Related" = adjacent area worth considering
+- Be thorough. Include borderline tickets and err on the side of inclusion.
+- Sort by relevance: Direct first, then Partial, then Related.
+- Use the ticket IDs exactly as they appear in the data (e.g. "12345").
+- Return ONLY the JSON object. No other text."""
 
 
 # ============================================================
@@ -1279,11 +1273,11 @@ def main():
     # ── Tabs ─────────────────────────────────────────────────
     _admin_mode = _is_admin()
     if _admin_mode:
-        tab1, tab2, tab3, tab_admin = st.tabs(
-            ["📋 Feature Requests", "💬 NPI Chatbot", "📊 Google Sheet", "Admin"]
+        tab1, tab3, tab_admin = st.tabs(
+            ["📋 Feature Requests", "📊 Google Sheet", "Admin"]
         )
     else:
-        tab1, tab2, tab3 = st.tabs(["📋 Feature Requests", "💬 NPI Chatbot", "📊 Google Sheet"])
+        tab1, tab3 = st.tabs(["📋 Feature Requests", "📊 Google Sheet"])
         tab_admin = None
 
     # ════════════════════════════════════════════════════════
@@ -1341,6 +1335,52 @@ def main():
 
         st.markdown("---")
 
+        # ── NPI Impact Analysis ──────────────────────────────
+        npi_col1, npi_col2 = st.columns([5, 1])
+        with npi_col1:
+            npi_input = st.text_input(
+                "🔬 NPI Impact Analysis",
+                placeholder="Describe an NPI change to find relevant tickets — e.g. 'We're adding bulk PDF export to the reporting module'",
+                label_visibility="collapsed",
+            )
+        with npi_col2:
+            if st.session_state.get("npi_results"):
+                if st.button("✕ Clear NPI", use_container_width=True):
+                    st.session_state.pop("npi_results", None)
+                    st.session_state.pop("npi_summary", None)
+                    st.rerun()
+
+        # Run NPI analysis when input changes
+        if npi_input and npi_input != st.session_state.get("npi_last_query"):
+            ai = get_anthropic_client()
+            if ai is None:
+                st.error("ANTHROPIC_API_KEY is not configured.")
+            else:
+                with st.spinner("Analyzing NPI impact across all tickets…"):
+                    system_prompt = build_system_prompt(df, contacts, summaries)
+                    try:
+                        resp = ai.messages.create(
+                            model="claude-sonnet-4-20250514",
+                            max_tokens=8192,
+                            thinking={"type": "enabled", "budget_tokens": 4096},
+                            system=system_prompt,
+                            messages=[{"role": "user", "content": npi_input}],
+                        )
+                        raw_text = ""
+                        for block in resp.content:
+                            if block.type == "text":
+                                raw_text = block.text.strip()
+                        # Strip code fences if present
+                        if raw_text.startswith("```"):
+                            raw_text = "\n".join(raw_text.split("\n")[1:]).rstrip("`").strip()
+                        result = json.loads(raw_text)
+                        st.session_state["npi_results"] = result.get("tickets", [])
+                        st.session_state["npi_summary"] = result.get("summary", "")
+                        st.session_state["npi_last_query"] = npi_input
+                        st.rerun()
+                    except (json.JSONDecodeError, Exception) as e:
+                        st.error(f"Failed to parse NPI analysis: {e}")
+
         # ── Filters ──────────────────────────────────────────
         with st.expander("🔍 Search & Filter", expanded=False):
             fc1, fc2, fc3, fc4 = st.columns(4)
@@ -1385,12 +1425,80 @@ def main():
         if status_filter != "All" and status_col:
             fdf = fdf[fdf[status_col].astype(str) == status_filter]
 
-        if len(fdf) != len(df):
-            st.caption(f"Showing {len(fdf):,} of {len(df):,} tickets")
+        # Apply NPI filter if active
+        npi_results = st.session_state.get("npi_results")
+        npi_active = npi_results is not None and len(npi_results) > 0
+        id_col_name = COLUMNS.get("id", "id")
+
+        if npi_active:
+            npi_summary = st.session_state.get("npi_summary", "")
+            if npi_summary:
+                st.info(f"**NPI Summary:** {npi_summary}")
+
+            # Build lookup from NPI results
+            relevance_map = {}
+            reason_map = {}
+            relevance_order = {"Direct": 0, "Partial": 1, "Related": 2}
+            for r in npi_results:
+                tid = str(r.get("id", ""))
+                relevance_map[tid] = r.get("relevance", "Related")
+                reason_map[tid] = r.get("reason", "")
+
+            # Filter to only NPI-matched tickets
+            npi_ids = set(relevance_map.keys())
+            fdf = fdf[fdf[id_col_name].astype(str).isin(npi_ids)]
+
+            # Add relevance columns
+            fdf = fdf.copy()
+            fdf["Relevance"] = fdf[id_col_name].astype(str).map(relevance_map).fillna("Related")
+            fdf["Reason"] = fdf[id_col_name].astype(str).map(reason_map).fillna("")
+            fdf["_rel_order"] = fdf["Relevance"].map(relevance_order).fillna(2)
+            fdf = fdf.sort_values("_rel_order")
+
+            # Show counts by relevance
+            direct_n = (fdf["Relevance"] == "Direct").sum()
+            partial_n = (fdf["Relevance"] == "Partial").sum()
+            related_n = (fdf["Relevance"] == "Related").sum()
+            st.caption(f"NPI matched {len(fdf):,} tickets — {direct_n} Direct · {partial_n} Partial · {related_n} Related")
+
+            # Export contacts button
+            contact_rows = []
+            for _, row in fdf.iterrows():
+                tid = str(row.get(id_col_name, ""))
+                c = contacts.get(tid, {})
+                name = c.get("name") or ""
+                company = c.get("company") or ""
+                role = c.get("role") or ""
+                if name:
+                    contact_rows.append({
+                        "Name": name,
+                        "Company": company,
+                        "Role": role,
+                        "Ticket": _get(row, "title"),
+                        "Relevance": relevance_map.get(tid, ""),
+                    })
+            if contact_rows:
+                contact_df = pd.DataFrame(contact_rows)
+                buf = io.StringIO()
+                contact_df.to_csv(buf, index=False)
+                st.download_button(
+                    f"📧 Export {len(contact_rows)} Contact(s)",
+                    buf.getvalue(),
+                    file_name=f"npi_contacts_{datetime.now().strftime('%Y%m%d')}.csv",
+                    mime="text/csv",
+                )
+        else:
+            if len(fdf) != len(df):
+                st.caption(f"Showing {len(fdf):,} of {len(df):,} tickets")
 
         # ── Table ─────────────────────────────────────────────
         all_display_keys = DISPLAY_KEYS
         display_cols = []
+
+        # If NPI is active, prepend Relevance and Reason columns
+        if npi_active:
+            display_cols = ["Relevance", "Reason"]
+
         for k in all_display_keys:
             if k == "contact":
                 if "contact" in fdf.columns:
@@ -1403,15 +1511,18 @@ def main():
         if not display_cols:
             display_cols = list(fdf.columns[:6])
 
+        # Remove internal sort column from display
+        show_df = fdf[[c for c in display_cols if c in fdf.columns]]
+
         col_config = {}
         link_col = COLUMNS.get("link", "")
-        if link_col and link_col in display_cols:
+        if link_col and link_col in show_df.columns:
             col_config[link_col] = st.column_config.LinkColumn(
                 "Link",
                 display_text="Shortcut Link",
             )
 
-        st.dataframe(fdf[display_cols], use_container_width=True, height=380, column_config=col_config)
+        st.dataframe(show_df, use_container_width=True, height=380, column_config=col_config)
 
         # ── Detail view ───────────────────────────────────────
         st.markdown("---")
@@ -1496,90 +1607,6 @@ def main():
                 file_name=f"fr_all_{datetime.now().strftime('%Y%m%d')}.csv",
                 mime="text/csv",
                 use_container_width=True,
-            )
-
-    # ════════════════════════════════════════════════════════
-    # TAB 2 — NPI CHATBOT
-    # ════════════════════════════════════════════════════════
-    with tab2:
-        st.subheader("💬 NPI Impact Chatbot")
-        st.markdown(
-            "Describe a **New Product Introduction (NPI) change** — a new feature, product update, "
-            "or architectural change — and I'll identify which feature request tickets would be "
-            "impacted or addressed, including who to notify."
-        )
-
-        if df.empty:
-            st.warning("No feature request tickets loaded. Please fix your data source first.")
-            st.stop()
-
-        if "chat_messages" not in st.session_state:
-            st.session_state.chat_messages = []
-
-        bar1, bar2 = st.columns([5, 1])
-        with bar1:
-            ticket_count = len(df) if CHATBOT_MAX_TICKETS is None else min(len(df), CHATBOT_MAX_TICKETS)
-            summarized_count = sum(1 for tid in df[COLUMNS.get("id", "id")].astype(str) if tid in summaries)
-            label = f"Analyzing all {ticket_count:,} feature request tickets"
-            if CHATBOT_MAX_TICKETS is not None and ticket_count < len(df):
-                label = f"Analyzing {ticket_count:,} feature request tickets ({ticket_count / len(df) * 100:.0f}% of total)"
-            parts = []
-            if summarized_count:
-                parts.append(f"{summarized_count:,} summarized")
-            if contacts_extracted:
-                parts.append(f"{contacts_extracted} contacts")
-            if parts:
-                label += f" · {' · '.join(parts)}"
-            st.caption(label)
-        with bar2:
-            if st.button("🗑️ Clear Chat", use_container_width=True):
-                st.session_state.chat_messages = []
-                st.rerun()
-
-        for msg in st.session_state.chat_messages:
-            with st.chat_message(msg["role"]):
-                st.markdown(msg["content"])
-
-        if user_input := st.chat_input("e.g. 'We're adding bulk PDF export to the reporting module'…"):
-            st.session_state.chat_messages.append({"role": "user", "content": user_input})
-            with st.chat_message("user"):
-                st.markdown(user_input)
-
-            with st.chat_message("assistant"):
-                placeholder = st.empty()
-                full_response = ""
-
-                ai = get_anthropic_client()
-                if ai is None:
-                    full_response = "❌ ANTHROPIC_API_KEY is not configured."
-                    placeholder.markdown(full_response)
-                else:
-                    system_prompt = build_system_prompt(df, contacts, summaries)
-                    api_msgs = [
-                        {"role": m["role"], "content": m["content"]}
-                        for m in st.session_state.chat_messages
-                    ]
-
-                    try:
-                        with ai.messages.stream(
-                            model="claude-opus-4-6",
-                            max_tokens=4096,
-                            thinking={"type": "adaptive"},
-                            system=system_prompt,
-                            messages=api_msgs,
-                        ) as stream:
-                            for chunk in stream.text_stream:
-                                full_response += chunk
-                                placeholder.markdown(full_response + "▌")
-
-                        placeholder.markdown(full_response)
-
-                    except Exception as e:
-                        full_response = f"❌ Claude API error: {e}"
-                        placeholder.markdown(full_response)
-
-            st.session_state.chat_messages.append(
-                {"role": "assistant", "content": full_response}
             )
 
     # ════════════════════════════════════════════════════════
