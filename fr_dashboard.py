@@ -157,6 +157,11 @@ SUMMARY_BATCH_SIZE = 20
 _contacts_lock = threading.Lock()
 _summaries_lock = threading.Lock()
 
+SCOPES = [
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/drive.readonly",
+]
+
 
 def _get_or_create_worksheet(sheet, tab_name, headers):
     """Get a worksheet by name, creating it with headers if it doesn't exist."""
@@ -168,25 +173,66 @@ def _get_or_create_worksheet(sheet, tab_name, headers):
         return ws
 
 
+# Thread-safe gspread client (bypasses @st.cache_resource which needs Streamlit context)
+_gsheet_client_lock = threading.Lock()
+_gsheet_client_instance = None
+
+
+def _get_gsheet_client_raw():
+    """Get a gspread client without Streamlit caching. Thread-safe."""
+    global _gsheet_client_instance
+    if _gsheet_client_instance is not None:
+        return _gsheet_client_instance
+    with _gsheet_client_lock:
+        if _gsheet_client_instance is not None:
+            return _gsheet_client_instance
+        sa_json = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON")
+        if sa_json:
+            creds = Credentials.from_service_account_info(json.loads(sa_json), scopes=SCOPES)
+            _gsheet_client_instance = gspread.authorize(creds)
+            return _gsheet_client_instance
+        try:
+            import streamlit as _st
+            creds = Credentials.from_service_account_info(
+                dict(_st.secrets["gcp_service_account"]), scopes=SCOPES
+            )
+            _gsheet_client_instance = gspread.authorize(creds)
+            return _gsheet_client_instance
+        except Exception:
+            pass
+        if os.path.exists("service_account.json"):
+            creds = Credentials.from_service_account_file("service_account.json", scopes=SCOPES)
+            _gsheet_client_instance = gspread.authorize(creds)
+            return _gsheet_client_instance
+    return None
+
+
+_results_sheet_instance = None
+_results_sheet_lock = threading.Lock()
+
+
 def _get_results_sheet():
-    """Return the results Google Sheet (cached)."""
-    client = get_gsheet_client()
-    if client is None:
-        return None
-    try:
-        return client.open_by_key(RESULTS_SHEET_ID)
-    except Exception:
-        return None
+    """Return the results Google Sheet. Thread-safe, cached in-process."""
+    global _results_sheet_instance
+    if _results_sheet_instance is not None:
+        return _results_sheet_instance
+    with _results_sheet_lock:
+        if _results_sheet_instance is not None:
+            return _results_sheet_instance
+        client = _get_gsheet_client_raw()
+        if client is None:
+            print("[_get_results_sheet] No gsheet client available")
+            return None
+        try:
+            _results_sheet_instance = client.open_by_key(RESULTS_SHEET_ID)
+            return _results_sheet_instance
+        except Exception as e:
+            print(f"[_get_results_sheet] Error opening sheet: {e}")
+            return None
 
 # ============================================================
 # GOOGLE SHEETS AUTH
 # ============================================================
-
-SCOPES = [
-    "https://www.googleapis.com/auth/spreadsheets",
-    "https://www.googleapis.com/auth/drive.readonly",
-]
-
 
 @st.cache_resource
 def get_gsheet_client():
