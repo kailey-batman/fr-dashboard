@@ -79,15 +79,12 @@ st.markdown("""
     .cat-stat-card .cat-name { color: #00E676; font-weight: 600; font-size: 0.9rem; }
     .cat-stat-card .cat-detail { color: #9E9E9E; font-size: 0.8rem; }
 
-    /* Top-bar: email pinned next to Streamlit toolbar */
-    .top-bar {
-        position: fixed; top: 9px; right: 48px; z-index: 1000;
-        display: flex; align-items: center; gap: 6px;
-        pointer-events: none;
+    /* Compact top-right toolbar buttons */
+    .top-right-bar [data-testid="stHorizontalBlock"] { gap: 0.5rem; }
+    .top-right-bar button {
+        padding: 0.25rem 0.75rem !important; font-size: 0.8rem !important;
     }
-    .top-bar-email {
-        color: #9E9E9E; font-size: 0.8rem; font-weight: 500;
-    }
+    .top-right-bar p { color: #9E9E9E; font-size: 0.82rem; margin: 0; line-height: 2.2; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -145,11 +142,12 @@ DISPLAY_KEYS = ["id", "title", "link", "timestamp", "submitter", "contact", "pro
 # Max tickets sent to the chatbot as context
 CHATBOT_MAX_TICKETS = None  # No limit — include all tickets
 
-# File used to persist extracted contacts across redeploys
-CONTACTS_FILE = "contacts.json"
-CONTACTS_PROGRESS_FILE = "contacts_progress.json"
-SUMMARIES_FILE = "fr_summaries.json"
-SUMMARIES_PROGRESS_FILE = "fr_summaries_progress.json"
+# Persistent data directory — use Railway volume mount if available, else local
+_DATA_DIR = "/data" if os.path.isdir("/data") else _APP_DIR
+CONTACTS_FILE = os.path.join(_DATA_DIR, "contacts.json")
+CONTACTS_PROGRESS_FILE = os.path.join(_DATA_DIR, "contacts_progress.json")
+SUMMARIES_FILE = os.path.join(_DATA_DIR, "fr_summaries.json")
+SUMMARIES_PROGRESS_FILE = os.path.join(_DATA_DIR, "fr_summaries_progress.json")
 SUMMARY_BATCH_SIZE = 20
 
 _contacts_lock = threading.Lock()
@@ -643,7 +641,7 @@ def _fill_from_custom_fields(df: pd.DataFrame) -> pd.DataFrame:
 # DATA LOAD
 # ============================================================
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=3600)
 def load_feature_requests() -> pd.DataFrame:
     """Pull the main sheet and return only open feature-request rows from 2025+."""
     client = get_gsheet_client()
@@ -966,18 +964,14 @@ def start_summary_extraction(df: pd.DataFrame, ai: anthropic.Anthropic):
 def apply_contacts_to_df(df: pd.DataFrame, contacts: dict) -> pd.DataFrame:
     """Add a 'contact' display column built from extracted contact data."""
     id_col = COLUMNS.get("id", "id")
-
-    def _contact_str(row):
-        tid = str(row.get(id_col, ""))
-        c = contacts.get(tid, {})
-        name = c.get("name") or ""
-        company = c.get("company") or ""
-        if name and company:
-            return f"{name} ({company})"
-        return name or company or ""
-
     df = df.copy()
-    df["contact"] = df.apply(_contact_str, axis=1)
+    tids = df[id_col].astype(str)
+    names = tids.map(lambda t: contacts.get(t, {}).get("name") or "")
+    companies = tids.map(lambda t: contacts.get(t, {}).get("company") or "")
+    both = (names != "") & (companies != "")
+    df["contact"] = ""
+    df.loc[both, "contact"] = names[both] + " (" + companies[both] + ")"
+    df.loc[~both, "contact"] = names[~both].where(names[~both] != "", companies[~both])
     return df
 
 
@@ -1104,7 +1098,7 @@ if "code" in _qp:
         st.session_state["_auth_error"] = _err
     else:
         st.session_state["_auth_user"] = _user
-        _log_visit(_user)
+        threading.Thread(target=_log_visit, args=(_user,), daemon=True).start()
     st.query_params.clear()
     st.rerun()
 
@@ -1122,8 +1116,10 @@ if "_session_id" not in st.session_state:
     st.session_state["_session_id"] = secrets.token_hex(8)
     st.session_state["_session_start"] = datetime.now()
     st.session_state["_last_heartbeat"] = datetime.now()
-    _row = _log_session_start(st.session_state["_auth_user"], st.session_state["_session_id"])
-    st.session_state["_activity_row"] = _row
+    threading.Thread(
+        target=lambda: st.session_state.update({"_activity_row": _log_session_start(st.session_state["_auth_user"], st.session_state["_session_id"])}),
+        daemon=True,
+    ).start()
 
 # Send heartbeat on each interaction (throttled to once per 55 seconds)
 _hb_now = datetime.now()
@@ -1142,82 +1138,42 @@ if (_hb_now - _hb_last).total_seconds() >= 55:
 # ============================================================
 
 def main():
-    # ── Handle menu actions via query params ──────────────────
-    _qp = st.query_params
-    if _qp.get("action") == "refresh":
-        st.query_params.clear()
-        st.cache_data.clear()
-        st.rerun()
-    elif _qp.get("action") == "signout":
-        st.query_params.clear()
-        if "_auth_user" in st.session_state:
-            del st.session_state["_auth_user"]
-        _clear_auth_cookie()
-        st.rerun()
-
-    # ── Email in top-right + inject menu items via JS ─────────
-    _auth_user = st.session_state.get("_auth_user", {})
-    _user_email = _auth_user.get("email", "")
-    st.markdown(f"""
-    <div class="top-bar">
-        <span class="top-bar-email">{_user_email}</span>
-    </div>
-    <script>
-    // Inject Refresh / Sign Out into Streamlit's three-dot menu
-    (function() {{
-        const ITEMS = [
-            {{label: '🔄 Refresh Data', action: 'refresh'}},
-            {{label: '🚪 Sign Out', action: 'signout'}},
-        ];
-        function inject(menuList) {{
-            if (menuList.querySelector('.custom-menu-item')) return;
-            const sep = document.createElement('hr');
-            sep.style.cssText = 'border:none;border-top:1px solid #444C56;margin:4px 0;';
-            menuList.prepend(sep);
-            ITEMS.slice().reverse().forEach(item => {{
-                const li = document.createElement('li');
-                li.className = 'custom-menu-item';
-                li.setAttribute('role', 'option');
-                li.style.cssText = 'padding:0.25rem 0.75rem;cursor:pointer;color:#E0E0E0;font-size:0.875rem;list-style:none;';
-                li.textContent = item.label;
-                li.onmouseenter = function() {{ this.style.backgroundColor='#444C56'; }};
-                li.onmouseleave = function() {{ this.style.backgroundColor=''; }};
-                li.onclick = function() {{
-                    window.location.search = '?action=' + item.action;
-                }};
-                menuList.prepend(li);
-            }});
-        }}
-        new MutationObserver(function(mutations) {{
-            for (const m of mutations) {{
-                for (const node of m.addedNodes) {{
-                    if (node.nodeType === 1) {{
-                        const ul = node.querySelector ? node.querySelector('[data-testid="main-menu-list"]') || node.querySelector('ul[role="listbox"]') : null;
-                        if (ul) inject(ul);
-                    }}
-                }}
-            }}
-        }}).observe(document.body, {{childList: true, subtree: true}});
-    }})();
-    </script>
-    """, unsafe_allow_html=True)
-
-    # ── Header: logo + title ─────────────────────────────────
+    # ── Header: logo + title on left, email + buttons on right ─
     app_dir = os.path.dirname(os.path.abspath(__file__))
     logo_path = os.path.join(app_dir, "logo.svg")
-    if os.path.exists(logo_path):
-        with open(logo_path, "r") as f:
-            logo_svg = f.read()
-        logo_b64 = base64.b64encode(logo_svg.encode()).decode()
-        st.markdown(f"""
-        <div class="header-container">
-            <img src="data:image/svg+xml;base64,{logo_b64}" />
-            <h1>Feature Request Dashboard</h1>
-        </div>
-        """, unsafe_allow_html=True)
-    else:
-        st.markdown('<h1 style="color:#00E676;">Feature Request Dashboard</h1>', unsafe_allow_html=True)
-    st.markdown('<div class="header-subtitle">Customer feature requests from Shortcut · NPI impact analysis</div>', unsafe_allow_html=True)
+    _auth_user = st.session_state.get("_auth_user", {})
+    _user_email = _auth_user.get("email", "")
+
+    hdr_left, hdr_right = st.columns([3, 1])
+    with hdr_left:
+        if os.path.exists(logo_path):
+            with open(logo_path, "r") as f:
+                logo_svg = f.read()
+            logo_b64 = base64.b64encode(logo_svg.encode()).decode()
+            st.markdown(f"""
+            <div class="header-container">
+                <img src="data:image/svg+xml;base64,{logo_b64}" />
+                <h1>Feature Request Dashboard</h1>
+            </div>
+            """, unsafe_allow_html=True)
+        else:
+            st.markdown('<h1 style="color:#00E676;">Feature Request Dashboard</h1>', unsafe_allow_html=True)
+        st.markdown('<div class="header-subtitle">Customer feature requests from Shortcut · NPI impact analysis</div>', unsafe_allow_html=True)
+
+    with hdr_right:
+        st.markdown('<div class="top-right-bar">', unsafe_allow_html=True)
+        st.markdown(f"{_user_email}")
+        r1, r2 = st.columns(2)
+        with r1:
+            if st.button("🔄 Refresh", key="_refresh_btn", use_container_width=True):
+                st.cache_data.clear()
+                st.rerun()
+        with r2:
+            if st.button("Sign out", key="_logout_btn", use_container_width=True):
+                del st.session_state["_auth_user"]
+                _clear_auth_cookie()
+                st.rerun()
+        st.markdown('</div>', unsafe_allow_html=True)
 
     # ── Load data ────────────────────────────────────────────
     with st.spinner("Loading feature requests…"):
@@ -1228,29 +1184,22 @@ def main():
     progress = load_contacts_progress()
     ai = get_anthropic_client()
 
-    # Count unanalyzed tickets
+    # Count unanalyzed tickets (fast set operation)
+    id_col_name = COLUMNS.get("id", "id")
     _unanalyzed_count = 0
     if not df.empty:
-        id_col_name = COLUMNS.get("id", "id")
-        _unanalyzed_count = sum(
-            1 for _, row in df.iterrows()
-            if str(row.get(id_col_name, "")) not in contacts
-        )
+        all_ids = set(df[id_col_name].astype(str))
+        _unanalyzed_count = len(all_ids - set(contacts.keys()))
 
     # Summary extraction (cached, incremental)
     summaries = load_summaries()
     sum_progress = load_summaries_progress()
 
     if not df.empty and ai:
-        id_col_name = COLUMNS.get("id", "id")
-        unsummarized = [
-            str(row.get(id_col_name, ""))
-            for _, row in df.iterrows()
-            if str(row.get(id_col_name, "")) not in summaries
-        ]
-        if unsummarized and not sum_progress.get("running"):
+        unsummarized_ids = all_ids - set(summaries.keys())
+        if unsummarized_ids and not sum_progress.get("running"):
             start_summary_extraction(df, ai)
-            sum_progress = {"running": True, "done": 0, "total": len(unsummarized)}
+            sum_progress = {"running": True, "done": 0, "total": len(unsummarized_ids)}
 
     any_running = progress.get("running") or sum_progress.get("running")
     if any_running:
