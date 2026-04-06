@@ -958,9 +958,9 @@ No other text."""
         return [{"id": t["id"], "is_customer_ticket": True, "name": None, "company": None, "role": None} for t in batch]
 
 
-def _run_contact_extraction_thread(df: pd.DataFrame, ai: anthropic.Anthropic):
+def _run_contact_extraction_thread(df: pd.DataFrame, ai: anthropic.Anthropic, existing_contacts: dict):
     try:
-        contacts = _load_contacts_from_sheet()
+        contacts = dict(existing_contacts)  # Work on a copy
         id_col    = COLUMNS.get("id", "id")
         title_col = COLUMNS.get("title", "name")
         desc_col  = COLUMNS.get("description", "description")
@@ -1023,10 +1023,10 @@ def _run_contact_extraction_thread(df: pd.DataFrame, ai: anthropic.Anthropic):
             pass
 
 
-def start_contact_extraction(df: pd.DataFrame, ai: anthropic.Anthropic):
+def start_contact_extraction(df: pd.DataFrame, ai: anthropic.Anthropic, existing_contacts: dict):
     t = threading.Thread(
         target=_run_contact_extraction_thread,
-        args=(df, ai),
+        args=(df, ai, existing_contacts),
         daemon=True,
     )
     t.start()
@@ -1131,9 +1131,9 @@ No other text."""
         return [{"id": t["id"], "summary": t["title"]} for t in batch]
 
 
-def _run_summary_extraction_thread(df: pd.DataFrame, ai: anthropic.Anthropic):
+def _run_summary_extraction_thread(df: pd.DataFrame, ai: anthropic.Anthropic, existing_summaries: dict):
     try:
-        summaries = _load_summaries_from_sheet()
+        summaries = dict(existing_summaries)  # Work on a copy
         id_col = COLUMNS.get("id", "id")
         title_col = COLUMNS.get("title", "name")
         desc_col = COLUMNS.get("description", "description")
@@ -1176,8 +1176,8 @@ def _run_summary_extraction_thread(df: pd.DataFrame, ai: anthropic.Anthropic):
             pass
 
 
-def start_summary_extraction(df: pd.DataFrame, ai: anthropic.Anthropic):
-    t = threading.Thread(target=_run_summary_extraction_thread, args=(df, ai), daemon=True)
+def start_summary_extraction(df: pd.DataFrame, ai: anthropic.Anthropic, existing_summaries: dict):
+    t = threading.Thread(target=_run_summary_extraction_thread, args=(df, ai, existing_summaries), daemon=True)
     t.start()
 
 
@@ -1416,17 +1416,26 @@ def main():
         except Exception:
             return False
 
-    # Auto-start contact extraction if needed
+    # Auto-start contact extraction if needed (once per session)
     _unanalyzed_count = len(all_ids - set(contacts.keys())) if all_ids else 0
-    if _unanalyzed_count > 0 and ai and not progress.get("running") and not _recently_completed(progress):
-        start_contact_extraction(df, ai)
+    if (_unanalyzed_count > 0 and ai
+            and not progress.get("running")
+            and not _recently_completed(progress)
+            and not st.session_state.get("_contacts_started")):
+        start_contact_extraction(df, ai, contacts)
+        st.session_state["_contacts_started"] = True
         progress = {"running": True, "done": 0, "total": _unanalyzed_count}
 
     # Auto-start summary extraction only if contacts are done (avoids API quota issues)
     _unsummarized_count = len(all_ids - set(summaries.keys())) if all_ids else 0
-    contacts_done = not progress.get("running") and _recently_completed(progress)
-    if _unsummarized_count > 0 and ai and not sum_progress.get("running") and not _recently_completed(sum_progress) and (contacts_done or _unanalyzed_count == 0):
-        start_summary_extraction(df, ai)
+    contacts_done = not progress.get("running") and (_recently_completed(progress) or _unanalyzed_count == 0)
+    if (_unsummarized_count > 0 and ai
+            and not sum_progress.get("running")
+            and not _recently_completed(sum_progress)
+            and contacts_done
+            and not st.session_state.get("_summaries_started")):
+        start_summary_extraction(df, ai, summaries)
+        st.session_state["_summaries_started"] = True
         sum_progress = {"running": True, "done": 0, "total": _unsummarized_count}
 
     any_running = progress.get("running") or sum_progress.get("running")
@@ -1462,10 +1471,12 @@ def main():
         if _unsummarized_count > 0:
             parts.append(f"{_unsummarized_count:,} unsummarized")
         if st.button(f"▶ Run Analysis ({' · '.join(parts)})", type="primary"):
-            # Clear completion guards so extraction starts fresh
+            # Clear all guards so extraction starts fresh
             for pf in [CONTACTS_PROGRESS_FILE, SUMMARIES_PROGRESS_FILE]:
                 with open(pf, "w") as f:
                     json.dump({"done": 0, "total": 0, "running": False}, f)
+            st.session_state.pop("_contacts_started", None)
+            st.session_state.pop("_summaries_started", None)
             load_contacts.clear()
             load_summaries.clear()
             st.rerun()
