@@ -30,9 +30,12 @@ st.set_page_config(
 st.markdown("""
 <style>
     .stApp { background-color: #2D333B; }
+    .block-container { padding-top: 1rem !important; }
+    [data-testid="stAppViewBlockContainer"] { padding-top: 1rem !important; }
+    header[data-testid="stHeader"] { height: 2rem !important; }
 
     .header-container {
-        display: flex; align-items: center; gap: 16px; padding: 0.5rem 0 0.5rem 0;
+        display: flex; align-items: center; gap: 16px; padding: 0 0 0.25rem 0;
     }
     .header-container img { width: 48px; height: 48px; }
     .header-container h1 { color: #00E676; margin: 0; font-size: 2rem; }
