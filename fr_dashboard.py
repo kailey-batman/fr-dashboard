@@ -166,10 +166,18 @@ SCOPES = [
 def _get_or_create_worksheet(sheet, tab_name, headers):
     """Get a worksheet by name, creating it with headers if it doesn't exist."""
     try:
-        return sheet.worksheet(tab_name)
+        ws = sheet.worksheet(tab_name)
+        # Ensure header row exists (could be missing if tab was cleared)
+        first_row = ws.row_values(1)
+        if not first_row or first_row != headers:
+            if not first_row:
+                ws.insert_row(headers, 1)
+            else:
+                ws.update('A1', [headers])
+        return ws
     except gspread.exceptions.WorksheetNotFound:
         ws = sheet.add_worksheet(title=tab_name, rows=1, cols=len(headers))
-        ws.append_row(headers)
+        ws.update('A1', [headers])
         return ws
 
 
@@ -954,63 +962,68 @@ No other text."""
 
 
 def _run_contact_extraction_thread(df: pd.DataFrame, ai: anthropic.Anthropic):
-    contacts = _load_contacts_from_sheet()
-    existing_ids = set(contacts.keys())
-    id_col    = COLUMNS.get("id", "id")
-    title_col = COLUMNS.get("title", "name")
-    desc_col  = COLUMNS.get("description", "description")
-    req_col   = COLUMNS.get("submitter", "requester")
+    try:
+        contacts = _load_contacts_from_sheet()
+        id_col    = COLUMNS.get("id", "id")
+        title_col = COLUMNS.get("title", "name")
+        desc_col  = COLUMNS.get("description", "description")
+        req_col   = COLUMNS.get("submitter", "requester")
 
-    # Stage 1: instant heuristic pre-filter
-    to_analyze = []
-    heuristic_batch = {}
-    for _, row in df.iterrows():
-        ticket_id   = str(row.get(id_col, ""))
-        if ticket_id in contacts:
-            continue
-        title       = str(row.get(title_col, ""))
-        description = str(row.get(desc_col, ""))
-        requester   = str(row.get(req_col, ""))
+        # Stage 1: instant heuristic pre-filter
+        to_analyze = []
+        heuristic_batch = {}
+        for _, row in df.iterrows():
+            ticket_id   = str(row.get(id_col, ""))
+            if ticket_id in contacts:
+                continue
+            title       = str(row.get(title_col, ""))
+            description = str(row.get(desc_col, ""))
+            requester   = str(row.get(req_col, ""))
 
-        if _is_internal_heuristic(requester, description):
-            entry = {"is_customer_ticket": False, "name": None, "company": None, "role": None}
-            contacts[ticket_id] = entry
-            heuristic_batch[ticket_id] = entry
-        else:
-            to_analyze.append({"id": ticket_id, "title": title, "description": description, "requester": requester})
+            if _is_internal_heuristic(requester, description):
+                entry = {"is_customer_ticket": False, "name": None, "company": None, "role": None}
+                contacts[ticket_id] = entry
+                heuristic_batch[ticket_id] = entry
+            else:
+                to_analyze.append({"id": ticket_id, "title": title, "description": description, "requester": requester})
 
-    # Save heuristic results immediately so the UI updates fast
-    if heuristic_batch:
-        append_contacts(heuristic_batch)
-    total = len(to_analyze)
+        # Save heuristic results immediately so the UI updates fast
+        if heuristic_batch:
+            append_contacts(heuristic_batch)
+        total = len(to_analyze)
 
-    # Stage 2: batch AI analysis for borderline tickets
-    for batch_start in range(0, total, ANALYSIS_BATCH_SIZE):
-        batch = to_analyze[batch_start: batch_start + ANALYSIS_BATCH_SIZE]
-        results = _analyze_batch(ai, batch)
+        # Stage 2: batch AI analysis for borderline tickets
+        for batch_start in range(0, total, ANALYSIS_BATCH_SIZE):
+            batch = to_analyze[batch_start: batch_start + ANALYSIS_BATCH_SIZE]
+            results = _analyze_batch(ai, batch)
 
-        batch_results = {}
-        for r in results:
-            tid = str(r.get("id", ""))
-            c = {
-                "is_customer_ticket": r.get("is_customer_ticket", True),
-                "name":    r.get("name"),
-                "company": r.get("company"),
-                "role":    r.get("role"),
-            }
-            contacts[tid] = c
-            batch_results[tid] = c
+            batch_results = {}
+            for r in results:
+                tid = str(r.get("id", ""))
+                c = {
+                    "is_customer_ticket": r.get("is_customer_ticket", True),
+                    "name":    r.get("name"),
+                    "company": r.get("company"),
+                    "role":    r.get("role"),
+                }
+                contacts[tid] = c
+                batch_results[tid] = c
 
-        done = batch_start + len(batch)
-        append_contacts(batch_results)
+            done = batch_start + len(batch)
+            append_contacts(batch_results)
+            with open(CONTACTS_PROGRESS_FILE, "w") as f:
+                json.dump({"done": done, "total": total, "running": True}, f)
+
+    except Exception as e:
+        print(f"[contact_extraction] THREAD CRASH: {e}")
+    finally:
         with open(CONTACTS_PROGRESS_FILE, "w") as f:
-            json.dump({"done": done, "total": total, "running": True}, f)
-
-    with open(CONTACTS_PROGRESS_FILE, "w") as f:
-        json.dump({"done": total, "total": total, "running": False,
-                   "completed_at": datetime.now().isoformat()}, f)
-    # Clear cache so next page load picks up new data
-    load_contacts.clear()
+            json.dump({"done": 0, "total": 0, "running": False,
+                       "completed_at": datetime.now().isoformat()}, f)
+        try:
+            load_contacts.clear()
+        except Exception:
+            pass
 
 
 def start_contact_extraction(df: pd.DataFrame, ai: anthropic.Anthropic):
@@ -1122,42 +1135,48 @@ No other text."""
 
 
 def _run_summary_extraction_thread(df: pd.DataFrame, ai: anthropic.Anthropic):
-    summaries = _load_summaries_from_sheet()
-    id_col = COLUMNS.get("id", "id")
-    title_col = COLUMNS.get("title", "name")
-    desc_col = COLUMNS.get("description", "description")
+    try:
+        summaries = _load_summaries_from_sheet()
+        id_col = COLUMNS.get("id", "id")
+        title_col = COLUMNS.get("title", "name")
+        desc_col = COLUMNS.get("description", "description")
 
-    to_summarize = []
-    for _, row in df.iterrows():
-        ticket_id = str(row.get(id_col, ""))
-        if ticket_id in summaries:
-            continue
-        to_summarize.append({
-            "id": ticket_id,
-            "title": str(row.get(title_col, "")),
-            "description": str(row.get(desc_col, "")),
-        })
+        to_summarize = []
+        for _, row in df.iterrows():
+            ticket_id = str(row.get(id_col, ""))
+            if ticket_id in summaries:
+                continue
+            to_summarize.append({
+                "id": ticket_id,
+                "title": str(row.get(title_col, "")),
+                "description": str(row.get(desc_col, "")),
+            })
 
-    total = len(to_summarize)
+        total = len(to_summarize)
 
-    for batch_start in range(0, total, SUMMARY_BATCH_SIZE):
-        batch = to_summarize[batch_start: batch_start + SUMMARY_BATCH_SIZE]
-        results = _summarize_batch(ai, batch)
-        batch_results = {}
-        for r in results:
-            tid = str(r.get("id", ""))
-            summaries[tid] = r.get("summary", "")
-            batch_results[tid] = r.get("summary", "")
-        done = batch_start + len(batch)
-        append_summaries(batch_results)
+        for batch_start in range(0, total, SUMMARY_BATCH_SIZE):
+            batch = to_summarize[batch_start: batch_start + SUMMARY_BATCH_SIZE]
+            results = _summarize_batch(ai, batch)
+            batch_results = {}
+            for r in results:
+                tid = str(r.get("id", ""))
+                summaries[tid] = r.get("summary", "")
+                batch_results[tid] = r.get("summary", "")
+            done = batch_start + len(batch)
+            append_summaries(batch_results)
+            with open(SUMMARIES_PROGRESS_FILE, "w") as f:
+                json.dump({"done": done, "total": total, "running": True}, f)
+
+    except Exception as e:
+        print(f"[summary_extraction] THREAD CRASH: {e}")
+    finally:
         with open(SUMMARIES_PROGRESS_FILE, "w") as f:
-            json.dump({"done": done, "total": total, "running": True}, f)
-
-    with open(SUMMARIES_PROGRESS_FILE, "w") as f:
-        json.dump({"done": total, "total": total, "running": False,
-                   "completed_at": datetime.now().isoformat()}, f)
-    # Clear cache so next page load picks up new data
-    load_summaries.clear()
+            json.dump({"done": 0, "total": 0, "running": False,
+                       "completed_at": datetime.now().isoformat()}, f)
+        try:
+            load_summaries.clear()
+        except Exception:
+            pass
 
 
 def start_summary_extraction(df: pd.DataFrame, ai: anthropic.Anthropic):
