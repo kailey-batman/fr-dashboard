@@ -1,5 +1,4 @@
 import streamlit as st
-import streamlit.components.v1 as st_components
 import pandas as pd
 import anthropic
 import gspread
@@ -83,8 +82,6 @@ st.markdown("""
     .cat-stat-card .cat-name { color: #00E676; font-weight: 600; font-size: 0.9rem; }
     .cat-stat-card .cat-detail { color: #9E9E9E; font-size: 0.8rem; }
 
-    /* Hide the zero-height iframe used for JS injection */
-    iframe[height="0"] { display: block !important; position: absolute; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -1361,84 +1358,39 @@ if (_hb_now - _hb_last).total_seconds() >= 55:
 # ============================================================
 
 def main():
-    # ── Handle menu actions via query params ──────────────────
-    _qp = st.query_params
-    if _qp.get("_action") == "refresh":
-        st.query_params.clear()
-        st.cache_data.clear()
-        st.rerun()
-    elif _qp.get("_action") == "signout":
-        st.query_params.clear()
-        if "_auth_user" in st.session_state:
-            del st.session_state["_auth_user"]
-        _clear_auth_cookie()
-        st.rerun()
-
-    # ── Inject custom items into the three-dot menu via JS ────
+    # ── Header: logo + title on left, actions on right ────────
     _auth_user = st.session_state.get("_auth_user", {})
     _user_email = _auth_user.get("email", "")
-    st_components.html(f"""
-    <script>
-    (function() {{
-        var doc = window.parent.document;
-        var ITEMS = [
-            {{label: '{_user_email}', action: null, style: 'color:#9E9E9E;font-size:0.8rem;padding:0.4rem 1rem;cursor:default;'}},
-            {{label: '🔄 Refresh Data', action: 'refresh', style: 'padding:0.4rem 1rem;cursor:pointer;color:#E0E0E0;font-size:0.875rem;'}},
-            {{label: '🚪 Sign Out', action: 'signout', style: 'padding:0.4rem 1rem;cursor:pointer;color:#E0E0E0;font-size:0.875rem;'}},
-        ];
-
-        function inject(menuList) {{
-            if (menuList.querySelector('.fr-custom-item')) return;
-            var sep = doc.createElement('hr');
-            sep.style.cssText = 'border:none;border-top:1px solid #444C56;margin:4px 0;';
-            sep.className = 'fr-custom-item';
-            menuList.prepend(sep);
-            ITEMS.slice().reverse().forEach(function(item) {{
-                var li = doc.createElement('li');
-                li.className = 'fr-custom-item';
-                li.setAttribute('role', 'option');
-                li.style.cssText = item.style + 'list-style:none;';
-                li.textContent = item.label;
-                if (item.action) {{
-                    li.onmouseenter = function() {{ this.style.backgroundColor='#444C56'; }};
-                    li.onmouseleave = function() {{ this.style.backgroundColor=''; }};
-                    li.onclick = function() {{ window.parent.location.search = '?_action=' + item.action; }};
-                }}
-                menuList.prepend(li);
-            }});
-        }}
-
-        new MutationObserver(function(mutations) {{
-            for (var i = 0; i < mutations.length; i++) {{
-                for (var j = 0; j < mutations[i].addedNodes.length; j++) {{
-                    var node = mutations[i].addedNodes[j];
-                    if (node.nodeType === 1 && node.querySelector) {{
-                        var ul = node.querySelector('ul[role="listbox"]');
-                        if (ul) inject(ul);
-                    }}
-                }}
-            }}
-        }}).observe(doc.body, {{childList: true, subtree: true}});
-    }})();
-    </script>
-    """, height=0)
-
-    # ── Header: logo + title ─────────────────────────────────
     app_dir = os.path.dirname(os.path.abspath(__file__))
     logo_path = os.path.join(app_dir, "logo.svg")
-    if os.path.exists(logo_path):
-        with open(logo_path, "r") as f:
-            logo_svg = f.read()
-        logo_b64 = base64.b64encode(logo_svg.encode()).decode()
-        st.markdown(f"""
-        <div class="header-container">
-            <img src="data:image/svg+xml;base64,{logo_b64}" />
-            <h1>Feature Request Dashboard</h1>
-        </div>
-        """, unsafe_allow_html=True)
-    else:
-        st.markdown('<h1 style="color:#00E676;">Feature Request Dashboard</h1>', unsafe_allow_html=True)
-    st.markdown('<div class="header-subtitle">Customer feature requests from Shortcut · NPI impact analysis</div>', unsafe_allow_html=True)
+
+    hdr_left, hdr_right = st.columns([3, 1])
+    with hdr_left:
+        if os.path.exists(logo_path):
+            with open(logo_path, "r") as f:
+                logo_svg = f.read()
+            logo_b64 = base64.b64encode(logo_svg.encode()).decode()
+            st.markdown(f"""
+            <div class="header-container">
+                <img src="data:image/svg+xml;base64,{logo_b64}" />
+                <h1>Feature Request Dashboard</h1>
+            </div>
+            """, unsafe_allow_html=True)
+        else:
+            st.markdown('<h1 style="color:#00E676;">Feature Request Dashboard</h1>', unsafe_allow_html=True)
+        st.markdown('<div class="header-subtitle">Customer feature requests from Shortcut · NPI impact analysis</div>', unsafe_allow_html=True)
+    with hdr_right:
+        st.caption(_user_email)
+        c1, c2 = st.columns(2)
+        with c1:
+            if st.button("🔄 Refresh", use_container_width=True):
+                st.cache_data.clear()
+                st.rerun()
+        with c2:
+            if st.button("Sign out", use_container_width=True):
+                del st.session_state["_auth_user"]
+                _clear_auth_cookie()
+                st.rerun()
 
     # ── Load data ────────────────────────────────────────────
     with st.spinner("Loading feature requests…"):
@@ -1501,6 +1453,22 @@ def main():
         </div>
         """, unsafe_allow_html=True)
         st.progress(done / total if total > 0 else 0)
+
+    # Manual trigger when nothing is running but there's work to do
+    if not any_running and ai and (_unanalyzed_count > 0 or _unsummarized_count > 0):
+        parts = []
+        if _unanalyzed_count > 0:
+            parts.append(f"{_unanalyzed_count:,} unanalyzed")
+        if _unsummarized_count > 0:
+            parts.append(f"{_unsummarized_count:,} unsummarized")
+        if st.button(f"▶ Run Analysis ({' · '.join(parts)})", type="primary"):
+            # Clear completion guards so extraction starts fresh
+            for pf in [CONTACTS_PROGRESS_FILE, SUMMARIES_PROGRESS_FILE]:
+                with open(pf, "w") as f:
+                    json.dump({"done": 0, "total": 0, "running": False}, f)
+            load_contacts.clear()
+            load_summaries.clear()
+            st.rerun()
 
     # Merge contacts into df and filter to customer tickets
     if not df.empty:
