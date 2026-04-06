@@ -173,6 +173,26 @@ def _get_or_create_worksheet(sheet, tab_name, headers):
         return ws
 
 
+# Cached worksheet singletons — avoid re-fetching on every call
+_ws_cache = {}
+_ws_cache_lock = threading.Lock()
+
+
+def _get_worksheet_cached(tab_name, headers):
+    """Get a worksheet singleton. Thread-safe, one API call per tab for the process lifetime."""
+    if tab_name in _ws_cache:
+        return _ws_cache[tab_name]
+    with _ws_cache_lock:
+        if tab_name in _ws_cache:
+            return _ws_cache[tab_name]
+        sheet = _get_results_sheet()
+        if sheet is None:
+            return None
+        ws = _get_or_create_worksheet(sheet, tab_name, headers)
+        _ws_cache[tab_name] = ws
+        return ws
+
+
 # Thread-safe gspread client (bypasses @st.cache_resource which needs Streamlit context)
 _gsheet_client_lock = threading.Lock()
 _gsheet_client_instance = None
@@ -777,16 +797,15 @@ def get_anthropic_client():
 # CONTACT EXTRACTION
 # ============================================================
 
+_CONTACTS_HEADERS = ["ticket_id", "is_customer_ticket", "name", "company", "role"]
+
+
 def _load_contacts_from_sheet() -> dict:
     """Read contacts from Google Sheet. Safe to call from threads."""
-    sheet = _get_results_sheet()
-    if sheet is None:
+    ws = _get_worksheet_cached(CONTACTS_TAB, _CONTACTS_HEADERS)
+    if ws is None:
         return {}
     try:
-        ws = _get_or_create_worksheet(
-            sheet, CONTACTS_TAB,
-            ["ticket_id", "is_customer_ticket", "name", "company", "role"],
-        )
         rows = ws.get_all_records()
         result = {}
         for r in rows:
@@ -813,15 +832,11 @@ def load_contacts() -> dict:
 def save_contacts(contacts: dict):
     """Full rewrite — use only at end of extraction, not per-batch."""
     with _contacts_lock:
-        sheet = _get_results_sheet()
-        if sheet is None:
+        ws = _get_worksheet_cached(CONTACTS_TAB, _CONTACTS_HEADERS)
+        if ws is None:
             return
         try:
-            ws = _get_or_create_worksheet(
-                sheet, CONTACTS_TAB,
-                ["ticket_id", "is_customer_ticket", "name", "company", "role"],
-            )
-            rows = [["ticket_id", "is_customer_ticket", "name", "company", "role"]]
+            rows = [_CONTACTS_HEADERS]
             for tid, c in contacts.items():
                 rows.append([
                     tid,
@@ -832,22 +847,18 @@ def save_contacts(contacts: dict):
                 ])
             ws.clear()
             ws.update(rows, value_input_option="RAW")
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[save_contacts] Error: {e}")
 
 
 def append_contacts(batch_contacts: dict):
     """Append a batch of contacts as new rows (fast, no full rewrite)."""
     with _contacts_lock:
-        sheet = _get_results_sheet()
-        if sheet is None:
-            print("[append_contacts] No results sheet available")
+        ws = _get_worksheet_cached(CONTACTS_TAB, _CONTACTS_HEADERS)
+        if ws is None:
+            print("[append_contacts] No worksheet available")
             return
         try:
-            ws = _get_or_create_worksheet(
-                sheet, CONTACTS_TAB,
-                ["ticket_id", "is_customer_ticket", "name", "company", "role"],
-            )
             rows = []
             for tid, c in batch_contacts.items():
                 rows.append([
@@ -1015,13 +1026,15 @@ def start_contact_extraction(df: pd.DataFrame, ai: anthropic.Anthropic):
 # TICKET SUMMARY EXTRACTION (cached, incremental)
 # ============================================================
 
+_SUMMARIES_HEADERS = ["ticket_id", "summary"]
+
+
 def _load_summaries_from_sheet() -> dict:
     """Read summaries from Google Sheet. Safe to call from threads."""
-    sheet = _get_results_sheet()
-    if sheet is None:
+    ws = _get_worksheet_cached(SUMMARIES_TAB, _SUMMARIES_HEADERS)
+    if ws is None:
         return {}
     try:
-        ws = _get_or_create_worksheet(sheet, SUMMARIES_TAB, ["ticket_id", "summary"])
         rows = ws.get_all_records()
         return {str(r.get("ticket_id", "")): r.get("summary", "") for r in rows if r.get("ticket_id")}
     except Exception as e:
@@ -1038,29 +1051,27 @@ def load_summaries() -> dict:
 def save_summaries(summaries: dict):
     """Full rewrite — use only at end of extraction, not per-batch."""
     with _summaries_lock:
-        sheet = _get_results_sheet()
-        if sheet is None:
+        ws = _get_worksheet_cached(SUMMARIES_TAB, _SUMMARIES_HEADERS)
+        if ws is None:
             return
         try:
-            ws = _get_or_create_worksheet(sheet, SUMMARIES_TAB, ["ticket_id", "summary"])
-            rows = [["ticket_id", "summary"]]
+            rows = [_SUMMARIES_HEADERS]
             for tid, summary in summaries.items():
                 rows.append([tid, summary])
             ws.clear()
             ws.update(rows, value_input_option="RAW")
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[save_summaries] Error: {e}")
 
 
 def append_summaries(batch_summaries: dict):
     """Append a batch of summaries as new rows (fast, no full rewrite)."""
     with _summaries_lock:
-        sheet = _get_results_sheet()
-        if sheet is None:
-            print("[append_summaries] No results sheet available")
+        ws = _get_worksheet_cached(SUMMARIES_TAB, _SUMMARIES_HEADERS)
+        if ws is None:
+            print("[append_summaries] No worksheet available")
             return
         try:
-            ws = _get_or_create_worksheet(sheet, SUMMARIES_TAB, ["ticket_id", "summary"])
             rows = [[tid, summary] for tid, summary in batch_summaries.items()]
             if rows:
                 ws.append_rows(rows, value_input_option="RAW")
@@ -1440,9 +1451,10 @@ def main():
         start_contact_extraction(df, ai)
         progress = {"running": True, "done": 0, "total": _unanalyzed_count}
 
-    # Auto-start summary extraction if needed
+    # Auto-start summary extraction only if contacts are done (avoids API quota issues)
     _unsummarized_count = len(all_ids - set(summaries.keys())) if all_ids else 0
-    if _unsummarized_count > 0 and ai and not sum_progress.get("running") and not _recently_completed(sum_progress):
+    contacts_done = not progress.get("running") and _recently_completed(progress)
+    if _unsummarized_count > 0 and ai and not sum_progress.get("running") and not _recently_completed(sum_progress) and (contacts_done or _unanalyzed_count == 0):
         start_summary_extraction(df, ai)
         sum_progress = {"running": True, "done": 0, "total": _unsummarized_count}
 
