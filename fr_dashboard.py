@@ -78,6 +78,23 @@ st.markdown("""
     }
     .cat-stat-card .cat-name { color: #00E676; font-weight: 600; font-size: 0.9rem; }
     .cat-stat-card .cat-detail { color: #9E9E9E; font-size: 0.8rem; }
+
+    /* Top-bar: fixed row aligned with Streamlit's toolbar */
+    .top-bar {
+        position: fixed; top: 6px; right: 50px; z-index: 999;
+        display: flex; align-items: center; gap: 8px;
+    }
+    .top-bar-email {
+        color: #9E9E9E; font-size: 0.82rem; margin-right: 4px;
+    }
+    .top-bar-btn {
+        background: #373E47; border: 1px solid #444C56; color: #E0E0E0;
+        border-radius: 6px; padding: 4px 12px; font-size: 0.8rem; cursor: pointer;
+    }
+    .top-bar-btn:hover { background: #444C56; color: #fff; }
+
+    /* Hide the default Streamlit top padding to make room */
+    .block-container { padding-top: 2rem !important; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -1132,41 +1149,43 @@ if (_hb_now - _hb_last).total_seconds() >= 55:
 # ============================================================
 
 def main():
-    # ── Header row: logo + title | refresh + user ─────────────
+    # ── Fixed top-right bar (aligned with Streamlit toolbar) ───
+    _auth_user = st.session_state.get("_auth_user", {})
+    _user_email = _auth_user.get("email", "")
+    st.markdown(f"""
+    <div class="top-bar">
+        <span class="top-bar-email">{_user_email}</span>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # Hidden buttons wired to the top-bar actions
+    _tb1, _tb2, _tb_spacer = st.columns([1, 1, 6])
+    with _tb1:
+        if st.button("🔄 Refresh Data", key="_refresh_btn"):
+            st.cache_data.clear()
+            st.rerun()
+    with _tb2:
+        if st.button("Sign out", key="_logout_btn"):
+            del st.session_state["_auth_user"]
+            _clear_auth_cookie()
+            st.rerun()
+
+    # ── Header: logo + title ─────────────────────────────────
     app_dir = os.path.dirname(os.path.abspath(__file__))
     logo_path = os.path.join(app_dir, "logo.svg")
-    _auth_user = st.session_state.get("_auth_user", {})
-
-    hdr_left, hdr_right = st.columns([4, 1])
-    with hdr_left:
-        if os.path.exists(logo_path):
-            with open(logo_path, "r") as f:
-                logo_svg = f.read()
-            logo_b64 = base64.b64encode(logo_svg.encode()).decode()
-            st.markdown(f"""
-            <div class="header-container">
-                <img src="data:image/svg+xml;base64,{logo_b64}" />
-                <h1>Feature Request Dashboard</h1>
-            </div>
-            """, unsafe_allow_html=True)
-        else:
-            st.markdown('<h1 style="color:#00E676;">Feature Request Dashboard</h1>', unsafe_allow_html=True)
-        st.markdown('<div class="header-subtitle">Customer feature requests from Shortcut · NPI impact analysis</div>', unsafe_allow_html=True)
-
-    with hdr_right:
-        r1, r2 = st.columns(2)
-        with r1:
-            if st.button("🔄 Refresh", use_container_width=True):
-                st.cache_data.clear()
-                st.rerun()
-        with r2:
-            with st.popover(f"👤 {_auth_user.get('email', '')}", use_container_width=True):
-                st.markdown(f"**{_auth_user.get('name', '')}**")
-                st.markdown(f"`{_auth_user.get('email', '')}`")
-                if st.button("Sign out", key="_logout_btn", use_container_width=True):
-                    del st.session_state["_auth_user"]
-                    _clear_auth_cookie()
-                    st.rerun()
+    if os.path.exists(logo_path):
+        with open(logo_path, "r") as f:
+            logo_svg = f.read()
+        logo_b64 = base64.b64encode(logo_svg.encode()).decode()
+        st.markdown(f"""
+        <div class="header-container">
+            <img src="data:image/svg+xml;base64,{logo_b64}" />
+            <h1>Feature Request Dashboard</h1>
+        </div>
+        """, unsafe_allow_html=True)
+    else:
+        st.markdown('<h1 style="color:#00E676;">Feature Request Dashboard</h1>', unsafe_allow_html=True)
+    st.markdown('<div class="header-subtitle">Customer feature requests from Shortcut · NPI impact analysis</div>', unsafe_allow_html=True)
 
     # ── Load data ────────────────────────────────────────────
     with st.spinner("Loading feature requests…"):
