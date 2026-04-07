@@ -824,16 +824,12 @@ def save_contacts(contacts: dict):
 
 
 def append_contacts(batch_contacts: dict):
-    """Append a batch of contacts as new rows (fast, no full rewrite)."""
+    """Append a batch of contacts as new rows."""
     with _contacts_lock:
-        ws = _get_worksheet_cached(CONTACTS_TAB, _CONTACTS_HEADERS)
-        if ws is None:
-            _err = f"[append_contacts] ws=None, sheet={_get_results_sheet()}"
-            print(_err)
-            with open(CONTACTS_PROGRESS_FILE, "w") as f:
-                json.dump({"error": _err, "running": False}, f)
-            return
         try:
+            client = get_gsheet_client()
+            sh = client.open_by_key(RESULTS_SHEET_ID)
+            ws = sh.worksheet(CONTACTS_TAB)
             rows = []
             for tid, c in batch_contacts.items():
                 rows.append([
@@ -1051,16 +1047,12 @@ def save_summaries(summaries: dict):
 
 
 def append_summaries(batch_summaries: dict):
-    """Append a batch of summaries as new rows (fast, no full rewrite)."""
+    """Append a batch of summaries as new rows."""
     with _summaries_lock:
-        ws = _get_worksheet_cached(SUMMARIES_TAB, _SUMMARIES_HEADERS)
-        if ws is None:
-            _err = f"[append_summaries] ws=None, sheet={_get_results_sheet()}"
-            print(_err)
-            with open(SUMMARIES_PROGRESS_FILE, "w") as f:
-                json.dump({"error": _err, "running": False}, f)
-            return
         try:
+            client = get_gsheet_client()
+            sh = client.open_by_key(RESULTS_SHEET_ID)
+            ws = sh.worksheet(SUMMARIES_TAB)
             rows = [[tid, summary] for tid, summary in batch_summaries.items()]
             if rows:
                 ws.append_rows(rows, value_input_option="RAW")
