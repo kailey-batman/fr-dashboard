@@ -828,7 +828,7 @@ def append_contacts(batch_contacts: dict):
     with _contacts_lock:
         ws = _get_worksheet_cached(CONTACTS_TAB, _CONTACTS_HEADERS)
         if ws is None:
-            _err = f"[append_contacts] ws=None, sheet={_get_results_sheet()}, client={_get_gsheet_client_raw()}"
+            _err = f"[append_contacts] ws=None, sheet={_get_results_sheet()}"
             print(_err)
             with open(CONTACTS_PROGRESS_FILE, "w") as f:
                 json.dump({"error": _err, "running": False}, f)
@@ -1055,7 +1055,7 @@ def append_summaries(batch_summaries: dict):
     with _summaries_lock:
         ws = _get_worksheet_cached(SUMMARIES_TAB, _SUMMARIES_HEADERS)
         if ws is None:
-            _err = f"[append_summaries] ws=None, sheet={_get_results_sheet()}, client={_get_gsheet_client_raw()}"
+            _err = f"[append_summaries] ws=None, sheet={_get_results_sheet()}"
             print(_err)
             with open(SUMMARIES_PROGRESS_FILE, "w") as f:
                 json.dump({"error": _err, "running": False}, f)
