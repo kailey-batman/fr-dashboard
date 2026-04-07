@@ -738,6 +738,14 @@ def load_feature_requests() -> pd.DataFrame:
             df[ts_col] = pd.to_datetime(df[ts_col], errors="coerce")
             df = df[df[ts_col] >= "2023-01-01"]
 
+        # Generate app_url from ticket ID if not present in sheet
+        id_col = COLUMNS.get("id", "id")
+        link_col = COLUMNS.get("link", "app_url")
+        if id_col in df.columns and (link_col not in df.columns or df[link_col].astype(str).str.strip().eq("").all()):
+            df[link_col] = df[id_col].astype(str).apply(
+                lambda tid: f"https://app.shortcut.com/fieldguide/story/{tid}" if tid else ""
+            )
+
         # Fill product_area / priority / severity from custom_fields if empty
         df = _fill_from_custom_fields(df)
 
