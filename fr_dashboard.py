@@ -226,9 +226,8 @@ def _get_results_sheet():
 # GOOGLE SHEETS AUTH
 # ============================================================
 
-@st.cache_resource
-def get_gsheet_client():
-    """Return an authenticated gspread client, or None on failure."""
+def _build_gsheet_client():
+    """Build a fresh gspread client. Thread-safe, no Streamlit cache dependency."""
     sa_json = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON")
     if sa_json:
         creds = Credentials.from_service_account_info(json.loads(sa_json), scopes=SCOPES)
@@ -247,6 +246,12 @@ def get_gsheet_client():
         return gspread.authorize(creds)
 
     return None
+
+
+@st.cache_resource
+def get_gsheet_client():
+    """Return an authenticated gspread client, or None on failure."""
+    return _build_gsheet_client()
 
 
 # ============================================================
@@ -473,9 +478,9 @@ def _log_visit(user_info):
             json.dump(existing, f, indent=2)
     except Exception:
         pass
-    # Google Sheets
+    # Google Sheets (use _build_gsheet_client for thread safety)
     try:
-        client = get_gsheet_client()
+        client = _build_gsheet_client()
         if client and SHEET_ID != "YOUR_SHEET_ID_HERE":
             ss = client.open_by_key(SHEET_ID)
             try:
@@ -484,8 +489,8 @@ def _log_visit(user_info):
                 ws = ss.add_worksheet(title=_ACCESS_LOG_TAB, rows=5000, cols=3)
                 ws.append_row(["Timestamp", "Email", "Name"])
             ws.append_row([entry["timestamp"], entry["email"], entry["name"]])
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"[_log_visit] Sheet write error: {e}")
 
 
 def _load_access_log():
@@ -538,7 +543,7 @@ def _log_session_start(user_info, session_id):
         pass
     # Google Sheets
     try:
-        client = get_gsheet_client()
+        client = _build_gsheet_client()
         if client and SHEET_ID != "YOUR_SHEET_ID_HERE":
             ss = client.open_by_key(SHEET_ID)
             try:
@@ -555,8 +560,8 @@ def _log_session_start(user_info, session_id):
                 return row_num
             except Exception:
                 return None
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"[_log_session_start] Sheet write error: {e}")
     return None
 
 
@@ -581,13 +586,13 @@ def _send_heartbeat(session_id, session_start, sheet_row):
     # Update Google Sheets row
     if sheet_row:
         try:
-            client = get_gsheet_client()
+            client = _build_gsheet_client()
             if client and SHEET_ID != "YOUR_SHEET_ID_HERE":
                 ss = client.open_by_key(SHEET_ID)
                 ws = ss.worksheet(_ACTIVITY_LOG_TAB)
                 ws.update(values=[[now_str, str(duration_min)]], range_name=f"E{sheet_row}:F{sheet_row}")
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[_send_heartbeat] Sheet write error: {e}")
 
 
 def _load_activity_log():
