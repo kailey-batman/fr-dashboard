@@ -927,14 +927,18 @@ No other text."""
 
 
 def _run_contact_extraction_thread(df: pd.DataFrame, ai: anthropic.Anthropic, existing_contacts: dict):
-    # Debug: test sheet write at very start of thread
+    # Build a fresh gspread client directly from env var (no Streamlit dependency)
     try:
-        client = get_gsheet_client()
-        if client is None:
-            raise RuntimeError("get_gsheet_client() returned None from thread")
-        sh = client.open_by_key(RESULTS_SHEET_ID)
-        ws = sh.worksheet(CONTACTS_TAB)
-        ws.append_rows([["THREAD_TEST", "True", "Debug", "Test", str(datetime.now())]], value_input_option="RAW")
+        sa_json = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON", "")
+        if not sa_json:
+            raise RuntimeError("GOOGLE_SERVICE_ACCOUNT_JSON env var not set")
+        sa_info = json.loads(sa_json)
+        _creds = Credentials.from_service_account_info(sa_info, scopes=SCOPES)
+        _thread_client = gspread.authorize(_creds)
+        _results_sh = _thread_client.open_by_key(RESULTS_SHEET_ID)
+        _contacts_ws = _results_sh.worksheet(CONTACTS_TAB)
+        # Quick test write
+        _contacts_ws.append_rows([["THREAD_TEST", "True", "Debug", sa_info.get("client_email","?"), str(datetime.now())]], value_input_option="RAW")
     except Exception as e:
         import traceback
         err_detail = f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
@@ -1379,6 +1383,7 @@ def main():
         with c1:
             if st.button("🔄 Refresh", use_container_width=True):
                 st.cache_data.clear()
+                st.cache_resource.clear()
                 st.rerun()
         with c2:
             if st.button("Sign out", use_container_width=True):
