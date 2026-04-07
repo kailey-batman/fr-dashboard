@@ -933,19 +933,21 @@ def _run_contact_extraction_thread(df: pd.DataFrame, ai: anthropic.Anthropic, ex
         if not sa_json:
             raise RuntimeError("GOOGLE_SERVICE_ACCOUNT_JSON env var not set")
         sa_info = json.loads(sa_json)
+        _email = sa_info.get("client_email", "UNKNOWN")
         _creds = Credentials.from_service_account_info(sa_info, scopes=SCOPES)
         _thread_client = gspread.authorize(_creds)
         _results_sh = _thread_client.open_by_key(RESULTS_SHEET_ID)
         _contacts_ws = _results_sh.worksheet(CONTACTS_TAB)
-        # Quick test write
-        _contacts_ws.append_rows([["THREAD_TEST", "True", "Debug", sa_info.get("client_email","?"), str(datetime.now())]], value_input_option="RAW")
+        _contacts_ws.append_rows([["THREAD_TEST", "True", "Debug", _email, str(datetime.now())]], value_input_option="RAW")
     except Exception as e:
-        import traceback
-        err_detail = f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
-        print(f"[contact_extraction] DEBUG WRITE FAILED: {err_detail}")
+        _email = "?"
+        try:
+            _email = json.loads(os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON", "{}")).get("client_email", "?")
+        except Exception:
+            pass
         with open(CONTACTS_PROGRESS_FILE, "w") as f:
-            json.dump({"error": err_detail[:500], "running": False,
-                       "completed_at": datetime.now().isoformat()}, f)
+            json.dump({"error": f"SA={_email} | Sheet={RESULTS_SHEET_ID} | {type(e).__name__}: {e}",
+                       "running": False, "completed_at": datetime.now().isoformat()}, f)
         return
 
     try:
