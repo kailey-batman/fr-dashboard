@@ -861,7 +861,10 @@ def append_contacts(batch_contacts: dict):
     with _contacts_lock:
         ws = _get_worksheet_cached(CONTACTS_TAB, _CONTACTS_HEADERS)
         if ws is None:
-            print("[append_contacts] No worksheet available")
+            _err = f"[append_contacts] ws=None, sheet={_get_results_sheet()}, client={_get_gsheet_client_raw()}"
+            print(_err)
+            with open(CONTACTS_PROGRESS_FILE, "w") as f:
+                json.dump({"error": _err, "running": False}, f)
             return
         try:
             rows = []
@@ -877,6 +880,8 @@ def append_contacts(batch_contacts: dict):
                 ws.append_rows(rows, value_input_option="RAW")
         except Exception as e:
             print(f"[append_contacts] Error: {e}")
+            with open(CONTACTS_PROGRESS_FILE, "w") as f:
+                json.dump({"error": str(e), "running": False}, f)
 
 
 def load_contacts_progress() -> dict:
@@ -1079,7 +1084,10 @@ def append_summaries(batch_summaries: dict):
     with _summaries_lock:
         ws = _get_worksheet_cached(SUMMARIES_TAB, _SUMMARIES_HEADERS)
         if ws is None:
-            print("[append_summaries] No worksheet available")
+            _err = f"[append_summaries] ws=None, sheet={_get_results_sheet()}, client={_get_gsheet_client_raw()}"
+            print(_err)
+            with open(SUMMARIES_PROGRESS_FILE, "w") as f:
+                json.dump({"error": _err, "running": False}, f)
             return
         try:
             rows = [[tid, summary] for tid, summary in batch_summaries.items()]
@@ -1087,6 +1095,8 @@ def append_summaries(batch_summaries: dict):
                 ws.append_rows(rows, value_input_option="RAW")
         except Exception as e:
             print(f"[append_summaries] Error: {e}")
+            with open(SUMMARIES_PROGRESS_FILE, "w") as f:
+                json.dump({"error": str(e), "running": False}, f)
 
 
 def load_summaries_progress() -> dict:
@@ -1462,6 +1472,11 @@ def main():
         </div>
         """, unsafe_allow_html=True)
         st.progress(done / total if total > 0 else 0)
+
+    # Show errors from extraction threads
+    for _prog, _label in [(progress, "Contact analysis"), (sum_progress, "Summarization")]:
+        if _prog.get("error"):
+            st.error(f"{_label} error: {_prog['error']}")
 
     # Manual trigger when nothing is running but there's work to do
     if not any_running and ai and (_unanalyzed_count > 0 or _unsummarized_count > 0):
