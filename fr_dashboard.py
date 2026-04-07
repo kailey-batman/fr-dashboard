@@ -795,7 +795,7 @@ def _load_contacts_from_sheet() -> dict:
         return {}
 
 
-@st.cache_data(ttl=120)
+@st.cache_data(ttl=3600)
 def load_contacts() -> dict:
     """Cached wrapper for main Streamlit thread."""
     return _load_contacts_from_sheet()
@@ -1047,7 +1047,7 @@ def _load_summaries_from_sheet() -> dict:
         return {}
 
 
-@st.cache_data(ttl=120)
+@st.cache_data(ttl=3600)
 def load_summaries() -> dict:
     """Cached wrapper for main Streamlit thread."""
     return _load_summaries_from_sheet()
