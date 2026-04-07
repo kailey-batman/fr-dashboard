@@ -1528,7 +1528,7 @@ def main():
             sub_html = f'<div style="color:#9E9E9E;font-size:0.78rem;margin-top:4px;">{sub}</div>' if sub else ""
             return f"""
             <div style="background-color:#373E47;border:1px solid #444C56;border-radius:10px;
-                        padding:16px 20px;min-height:100px;display:flex;flex-direction:column;justify-content:space-between;">
+                        padding:16px 20px;height:120px;display:flex;flex-direction:column;justify-content:space-between;">
                 <div style="color:#9E9E9E;font-size:0.85rem;font-weight:700;">{label}</div>
                 <div style="color:#E0E0E0;font-size:2rem;font-weight:700;line-height:1.1;">{value}</div>
                 {sub_html}
@@ -1570,11 +1570,23 @@ def main():
         st.markdown("---")
 
         # ── NPI Impact Analysis ──────────────────────────────
+        st.markdown("""
+        <div style="background:linear-gradient(135deg,#1a3a2a,#2D333B);border:2px solid #00E676;
+                    border-radius:12px;padding:20px 24px 12px 24px;margin-bottom:16px;">
+            <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;">
+                <span style="font-size:1.4rem;">🔬</span>
+                <span style="color:#00E676;font-size:1.1rem;font-weight:700;">NPI Impact Analysis</span>
+            </div>
+            <div style="color:#9E9E9E;font-size:0.85rem;margin-bottom:4px;">
+                Describe a product change to find which tickets it would address and who to notify.
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
         npi_col1, npi_col2 = st.columns([5, 1])
         with npi_col1:
             npi_input = st.text_input(
                 "🔬 NPI Impact Analysis",
-                placeholder="Describe an NPI change to find relevant tickets — e.g. 'We're adding bulk PDF export to the reporting module'",
+                placeholder="e.g. 'We're adding bulk PDF export to the reporting module'",
                 label_visibility="collapsed",
             )
         with npi_col2:
