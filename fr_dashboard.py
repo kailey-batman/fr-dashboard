@@ -1693,12 +1693,14 @@ def main():
             if npi_summary:
                 st.info(f"**NPI Summary:** {npi_summary}")
 
-            # Build lookup from NPI results
+            # Build lookup from NPI results (strip sc- prefix if present)
             relevance_map = {}
             reason_map = {}
             relevance_order = {"Direct": 0, "Partial": 1, "Related": 2}
             for r in npi_results:
                 tid = str(r.get("id", ""))
+                if tid.startswith("sc-"):
+                    tid = tid[3:]
                 relevance_map[tid] = r.get("relevance", "Related")
                 reason_map[tid] = r.get("reason", "")
 
