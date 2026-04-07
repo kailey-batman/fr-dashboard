@@ -930,14 +930,17 @@ def _run_contact_extraction_thread(df: pd.DataFrame, ai: anthropic.Anthropic, ex
     # Debug: test sheet write at very start of thread
     try:
         client = get_gsheet_client()
+        if client is None:
+            raise RuntimeError("get_gsheet_client() returned None from thread")
         sh = client.open_by_key(RESULTS_SHEET_ID)
         ws = sh.worksheet(CONTACTS_TAB)
         ws.append_rows([["THREAD_TEST", "True", "Debug", "Test", str(datetime.now())]], value_input_option="RAW")
-        print("[contact_extraction] DEBUG WRITE SUCCEEDED")
     except Exception as e:
-        print(f"[contact_extraction] DEBUG WRITE FAILED: {e}")
+        import traceback
+        err_detail = f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
+        print(f"[contact_extraction] DEBUG WRITE FAILED: {err_detail}")
         with open(CONTACTS_PROGRESS_FILE, "w") as f:
-            json.dump({"error": f"Sheet write test failed: {e}", "running": False,
+            json.dump({"error": err_detail[:500], "running": False,
                        "completed_at": datetime.now().isoformat()}, f)
         return
 
