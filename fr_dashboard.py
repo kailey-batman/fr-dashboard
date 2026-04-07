@@ -927,6 +927,20 @@ No other text."""
 
 
 def _run_contact_extraction_thread(df: pd.DataFrame, ai: anthropic.Anthropic, existing_contacts: dict):
+    # Debug: test sheet write at very start of thread
+    try:
+        client = get_gsheet_client()
+        sh = client.open_by_key(RESULTS_SHEET_ID)
+        ws = sh.worksheet(CONTACTS_TAB)
+        ws.append_rows([["THREAD_TEST", "True", "Debug", "Test", str(datetime.now())]], value_input_option="RAW")
+        print("[contact_extraction] DEBUG WRITE SUCCEEDED")
+    except Exception as e:
+        print(f"[contact_extraction] DEBUG WRITE FAILED: {e}")
+        with open(CONTACTS_PROGRESS_FILE, "w") as f:
+            json.dump({"error": f"Sheet write test failed: {e}", "running": False,
+                       "completed_at": datetime.now().isoformat()}, f)
+        return
+
     try:
         contacts = dict(existing_contacts)  # Work on a copy
         id_col    = COLUMNS.get("id", "id")
