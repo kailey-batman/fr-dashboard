@@ -1380,7 +1380,6 @@ def main():
             st.markdown('<h1 style="color:#00E676;">Feature Request Dashboard</h1>', unsafe_allow_html=True)
         st.markdown('<div class="header-subtitle">Customer feature requests from Shortcut · NPI impact analysis</div>', unsafe_allow_html=True)
     with hdr_right:
-        st.caption(_user_email)
         c1, c2 = st.columns(2)
         with c1:
             if st.button("🔄 Refresh", use_container_width=True):
