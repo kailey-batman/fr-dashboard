@@ -732,11 +732,11 @@ def load_feature_requests() -> pd.DataFrame:
         if "is_completed" in df.columns:
             df = df[df["is_completed"].astype(str).str.strip().str.lower() != "true"]
 
-        # Parse timestamp and filter to 2025+
+        # Parse timestamp and filter to 2023+
         ts_col = COLUMNS.get("timestamp", "")
         if ts_col and ts_col in df.columns:
             df[ts_col] = pd.to_datetime(df[ts_col], errors="coerce")
-            df = df[df[ts_col] >= "2025-01-01"]
+            df = df[df[ts_col] >= "2023-01-01"]
 
         # Fill product_area / priority / severity from custom_fields if empty
         df = _fill_from_custom_fields(df)
@@ -1522,7 +1522,7 @@ def main():
             st.warning("No feature request tickets found. Check your sheet ID, tab name, and column configuration.")
             st.stop()
 
-        st.markdown(f'<div style="color:#9E9E9E;font-size:0.9rem;margin-bottom:12px;">Showing {len(df):,} open feature requests from 2025</div>', unsafe_allow_html=True)
+        st.markdown(f'<div style="color:#9E9E9E;font-size:0.9rem;margin-bottom:12px;">Showing {len(df):,} open feature requests since 2023</div>', unsafe_allow_html=True)
 
         def metric_card(label, value, sub=None):
             sub_html = f'<div style="color:#9E9E9E;font-size:0.78rem;margin-top:4px;">{sub}</div>' if sub else ""
