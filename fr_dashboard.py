@@ -35,7 +35,7 @@ st.markdown("""
     header[data-testid="stHeader"] { height: 2rem !important; }
 
     .header-container {
-        display: flex; align-items: center; gap: 16px; padding: 0 0 0.25rem 0;
+        display: flex; align-items: center; gap: 16px; padding: 1.5rem 0 0.25rem 0;
     }
     .header-container img { width: 48px; height: 48px; }
     .header-container h1 { color: #00E676; margin: 0; font-size: 2rem; }
@@ -1547,7 +1547,7 @@ def main():
 
         m1, m2, m3, m4 = st.columns(4)
         with m1:
-            st.markdown(metric_card("Total Requests", f"{len(df):,}"), unsafe_allow_html=True)
+            st.markdown(metric_card("Customer Identified Requests", f"{len(df):,}"), unsafe_allow_html=True)
         with m2:
             pct = f"{int(high)/len(df)*100:.0f}% of total" if isinstance(high, (int, float)) and len(df) > 0 else ""
             st.markdown(metric_card("High Priority", high, sub=pct), unsafe_allow_html=True)
