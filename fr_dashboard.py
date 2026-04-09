@@ -1723,6 +1723,8 @@ def main():
 
             # Export contacts button
             contact_rows = []
+            link_col_name = COLUMNS.get("link", "app_url")
+            status_col_name = COLUMNS.get("status", "state")
             for _, row in fdf.iterrows():
                 tid = str(row.get(id_col_name, ""))
                 c = contacts.get(tid, {})
@@ -1735,6 +1737,8 @@ def main():
                         "Company": company,
                         "Role": role,
                         "Ticket": _get(row, "title"),
+                        "Status": str(row.get(status_col_name, "")) if status_col_name and status_col_name in row.index else "",
+                        "Shortcut Link": str(row.get(link_col_name, "")) if link_col_name and link_col_name in row.index else "",
                         "Relevance": relevance_map.get(tid, ""),
                     })
             if contact_rows:
@@ -1781,6 +1785,9 @@ def main():
                 "Link",
                 display_text="Shortcut Link",
             )
+        status_col = COLUMNS.get("status", "")
+        if status_col and status_col in show_df.columns:
+            col_config[status_col] = st.column_config.TextColumn("Status")
 
         st.dataframe(show_df, use_container_width=True, height=380, column_config=col_config)
 
