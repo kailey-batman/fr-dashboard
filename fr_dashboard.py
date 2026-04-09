@@ -134,7 +134,7 @@ CUSTOMER_KEYWORDS = [
 ANALYSIS_BATCH_SIZE = 20
 
 # Columns shown in the main data table (logical key names from COLUMNS dict above)
-DISPLAY_KEYS = ["id", "title", "link", "timestamp", "submitter", "contact", "product_area", "priority", "severity", "status", "l2_support_level", "labels", "epic"]
+DISPLAY_KEYS = ["id", "title", "link", "timestamp", "submitter", "contact", "product_area", "priority", "severity", "status", "labels", "epic"]
 
 # Max tickets sent to the chatbot as context
 CHATBOT_MAX_TICKETS = None  # No limit — include all tickets
@@ -682,14 +682,7 @@ def _fill_from_custom_fields(df: pd.DataFrame) -> pd.DataFrame:
         ("skill_set",      "skill_set"),
         ("technical area", "technical_area"),
         ("technical_area", "technical_area"),
-        ("l2 support level", "l2_support_level"),
-        ("l2_support_level", "l2_support_level"),
     ]
-
-    # Ensure target columns exist so custom field values can be written
-    for _, col in keyword_to_col:
-        if col not in df.columns:
-            df[col] = ""
 
     for idx, row in df.iterrows():
         cf_raw = str(row.get("custom_fields", ""))
@@ -1564,9 +1557,7 @@ def main():
         area_count = df[area_col].nunique() if area_col else "—"
         contacts_found = sum(1 for v in contacts.values() if v.get("name"))
 
-        no_epd_count = df["l2_support_level"].astype(str).str.lower().str.contains("no epd", na=False).sum() if "l2_support_level" in df.columns else 0
-
-        m1, m2, m3, m4, m5 = st.columns(5)
+        m1, m2, m3, m4 = st.columns(4)
         with m1:
             st.markdown(metric_card("Customer Identified Requests", f"{len(df):,}"), unsafe_allow_html=True)
         with m2:
@@ -1576,9 +1567,6 @@ def main():
             st.markdown(metric_card("Open", open_count), unsafe_allow_html=True)
         with m4:
             st.markdown(metric_card("Product Areas", area_count, sub=f"{contacts_found} contacts extracted"), unsafe_allow_html=True)
-        with m5:
-            epd_pct = f"{no_epd_count/len(df)*100:.0f}% of total" if no_epd_count and len(df) > 0 else ""
-            st.markdown(metric_card("No EPD Involved", no_epd_count, sub=epd_pct), unsafe_allow_html=True)
 
         st.markdown("---")
 
@@ -1776,9 +1764,9 @@ def main():
             display_cols = ["Relevance", "Reason"]
 
         for k in all_display_keys:
-            if k in ("contact", "l2_support_level"):
-                if k in fdf.columns:
-                    display_cols.append(k)
+            if k == "contact":
+                if "contact" in fdf.columns:
+                    display_cols.append("contact")
             else:
                 col = COLUMNS.get(k)
                 if col and col in fdf.columns:
@@ -1800,8 +1788,6 @@ def main():
         status_col = COLUMNS.get("status", "")
         if status_col and status_col in show_df.columns:
             col_config[status_col] = st.column_config.TextColumn("Status")
-        if "l2_support_level" in show_df.columns:
-            col_config["l2_support_level"] = st.column_config.TextColumn("L2 Support Level")
 
         st.dataframe(show_df, use_container_width=True, height=380, column_config=col_config)
 
