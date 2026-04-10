@@ -2030,52 +2030,92 @@ def main():
             link_col_name = COLUMNS.get("link", "app_url")
             status_col_name = COLUMNS.get("status", "state")
 
-            # ── Editable NPI table ────────────────────────────────
+            # ── Color-coded NPI table + editable columns ─────────
             link_col_name = COLUMNS.get("link", "app_url")
             status_col_name = COLUMNS.get("status", "state")
+            title_col_name = COLUMNS.get("title", "name")
             _fdf_tids = fdf[id_col_name].astype(str).tolist()
 
-            # Build display df once (not in a fragment)
-            npi_display_cols = ["Relevance", "Email", "Reason"]
-            for k in ["id", "title", "link", "contact", "submitter", "status"]:
-                if k == "contact":
-                    if "contact" in fdf.columns:
-                        npi_display_cols.append("contact")
-                else:
-                    col = COLUMNS.get(k)
-                    if col and col in fdf.columns:
-                        npi_display_cols.append(col)
-            npi_display_cols.append("Requester")
-
-            show_df = fdf[[c for c in npi_display_cols if c in fdf.columns]].copy()
-
-            npi_col_config = {
-                "Relevance": st.column_config.SelectboxColumn(
-                    "Relevance",
-                    options=["Direct", "Partial", "Related", "Exclude"],
-                    required=True,
-                    width="small",
-                ),
-                "Email": st.column_config.TextColumn("Email", width="medium"),
-                "Reason": st.column_config.TextColumn("Reason"),
-                "Requester": st.column_config.TextColumn("Filed By", width="medium"),
+            _relevance_colors = {
+                "Direct":  {"bg": "#d4edda", "text": "#155724"},
+                "Partial": {"bg": "#fff3cd", "text": "#856404"},
+                "Related": {"bg": "#f8d7da", "text": "#721c24"},
+                "Exclude": {"bg": "#e2e3e5", "text": "#6c757d"},
             }
-            if link_col_name and link_col_name in show_df.columns:
-                npi_col_config[link_col_name] = st.column_config.LinkColumn("Link", display_text="Shortcut ↗", width="small")
-            if status_col_name and status_col_name in show_df.columns:
-                npi_col_config[status_col_name] = st.column_config.TextColumn("Status", width="small")
 
-            disabled_cols = [c for c in show_df.columns if c not in ("Relevance", "Email")]
+            # Build HTML table with colored rows
+            _html_rows = []
+            for _, row in fdf.iterrows():
+                tid = str(row.get(id_col_name, ""))
+                rel = str(row.get("Relevance", "Related"))
+                colors = _relevance_colors.get(rel, _relevance_colors["Related"])
+                title = str(row.get(title_col_name, "")) if title_col_name and title_col_name in row.index else ""
+                link = str(row.get(link_col_name, "")) if link_col_name and link_col_name in row.index else ""
+                contact = str(row.get("contact", "")) if "contact" in row.index else ""
+                email = str(row.get("Email", ""))
+                reason = str(row.get("Reason", ""))
+                status = str(row.get(status_col_name, "")) if status_col_name and status_col_name in row.index else ""
 
-            st.data_editor(
-                show_df,
-                use_container_width=True,
-                height=450,
-                column_config=npi_col_config,
-                disabled=disabled_cols,
-                hide_index=True,
-                key="npi_editor",
-            )
+                title_cell = f'<a href="{link}" target="_blank" style="color:{colors["text"]};text-decoration:none;font-weight:600;">{title}</a>' if link and link not in ("", "nan") else f'<span style="font-weight:600;">{title}</span>'
+
+                _html_rows.append(f"""
+                <tr style="background:{colors['bg']};color:{colors['text']};">
+                    <td style="font-weight:700;white-space:nowrap;">{rel}</td>
+                    <td>{title_cell}</td>
+                    <td>{contact}</td>
+                    <td style="font-size:0.85em;">{email}</td>
+                    <td style="font-size:0.85em;">{reason}</td>
+                    <td style="font-size:0.85em;">{status}</td>
+                </tr>""")
+
+            _table_html = f"""
+            <div style="max-height:450px;overflow-y:auto;border-radius:8px;border:1px solid #dee2e6;">
+            <table style="width:100%;border-collapse:collapse;font-size:0.9rem;font-family:inherit;">
+                <thead>
+                    <tr style="background:#f8f9fa;color:#495057;position:sticky;top:0;z-index:1;">
+                        <th style="padding:10px 12px;text-align:left;border-bottom:2px solid #dee2e6;white-space:nowrap;">Relevance</th>
+                        <th style="padding:10px 12px;text-align:left;border-bottom:2px solid #dee2e6;">Ticket</th>
+                        <th style="padding:10px 12px;text-align:left;border-bottom:2px solid #dee2e6;">Contact</th>
+                        <th style="padding:10px 12px;text-align:left;border-bottom:2px solid #dee2e6;">Email</th>
+                        <th style="padding:10px 12px;text-align:left;border-bottom:2px solid #dee2e6;">Reason</th>
+                        <th style="padding:10px 12px;text-align:left;border-bottom:2px solid #dee2e6;">Status</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {"".join(_html_rows)}
+                </tbody>
+            </table>
+            </div>"""
+            st.markdown(_table_html, unsafe_allow_html=True)
+
+            # Editable overrides (compact data_editor for Relevance + Email only)
+            with st.expander("✏️ Edit Relevance & Email", expanded=False):
+                edit_df = fdf[[id_col_name, title_col_name, "Relevance", "Email"]].copy() if title_col_name and title_col_name in fdf.columns else fdf[[id_col_name, "Relevance", "Email"]].copy()
+
+                edit_col_config = {
+                    id_col_name: st.column_config.TextColumn("ID", width="small"),
+                    "Relevance": st.column_config.SelectboxColumn(
+                        "Relevance",
+                        options=["Direct", "Partial", "Related", "Exclude"],
+                        required=True,
+                        width="small",
+                    ),
+                    "Email": st.column_config.TextColumn("Email", width="medium"),
+                }
+                if title_col_name and title_col_name in edit_df.columns:
+                    edit_col_config[title_col_name] = st.column_config.TextColumn("Ticket", width="large")
+
+                edit_disabled = [c for c in edit_df.columns if c not in ("Relevance", "Email")]
+
+                st.data_editor(
+                    edit_df,
+                    use_container_width=True,
+                    height=350,
+                    column_config=edit_col_config,
+                    disabled=edit_disabled,
+                    hide_index=True,
+                    key="npi_editor",
+                )
 
             # Helper: read current overrides from editor state (no rerun needed)
             def _get_current_overrides() -> dict:
