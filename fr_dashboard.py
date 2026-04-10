@@ -1430,7 +1430,9 @@ Rules:
 - Be thorough. Include borderline tickets and err on the side of inclusion.
 - Sort by relevance: Direct first, then Partial, then Related.
 - Use the ticket IDs exactly as they appear in the data (e.g. "12345").
-- Return ONLY the JSON object. No other text."""
+- Return ONLY the JSON object. No other text.
+
+When the user provides follow-up feedback (e.g. "also include tickets about X", "remove the Related ones", "these 3 aren't relevant"), incorporate their feedback and return a COMPLETE updated JSON object with the same structure — not just the changes, but the full revised list of tickets. Merge your previous analysis with the new feedback."""
 
 
 # ============================================================
@@ -1767,44 +1769,70 @@ def main():
                     st.session_state.pop("npi_overrides", None)
                     st.session_state.pop("npi_last_query", None)
                     st.session_state.pop("npi_email_cache", None)
+                    st.session_state.pop("npi_messages", None)
                     st.rerun()
 
-        # Run NPI analysis when input changes
-        if npi_input and npi_input != st.session_state.get("npi_last_query"):
+        def _run_npi_analysis(messages: list[dict], spinner_text: str):
+            """Send messages to Claude and parse NPI results."""
             ai = get_anthropic_client()
             if ai is None:
                 st.error("ANTHROPIC_API_KEY is not configured.")
-            else:
-                with st.spinner("Analyzing NPI impact across all tickets…"):
-                    system_prompt = build_system_prompt(df, contacts, summaries)
-                    try:
-                        resp = ai.messages.create(
-                            model="claude-sonnet-4-20250514",
-                            max_tokens=8192,
-                            thinking={"type": "enabled", "budget_tokens": 4096},
-                            system=system_prompt,
-                            messages=[{"role": "user", "content": npi_input}],
-                        )
-                        raw_text = ""
-                        for block in resp.content:
-                            if block.type == "text":
-                                raw_text = block.text.strip()
-                        # Strip code fences if present
-                        if raw_text.startswith("```"):
-                            raw_text = "\n".join(raw_text.split("\n")[1:]).rstrip("`").strip()
-                        result = json.loads(raw_text)
-                        npi_tickets = result.get("tickets", [])
-                        st.session_state["npi_results"] = npi_tickets
-                        st.session_state["npi_summary"] = result.get("summary", "")
-                        st.session_state["npi_last_query"] = npi_input
-                        st.session_state.pop("npi_overrides", None)
-                        # Lookup emails from Hasura for matched tickets
-                        matched_ids = [str(t.get("id", "")).lstrip("sc-") for t in npi_tickets]
-                        email_cache = lookup_emails_for_npi(matched_ids, contacts)
-                        st.session_state["npi_email_cache"] = email_cache
-                        st.rerun()
-                    except (json.JSONDecodeError, Exception) as e:
-                        st.error(f"Failed to parse NPI analysis: {e}")
+                return False
+            with st.spinner(spinner_text):
+                system_prompt = build_system_prompt(df, contacts, summaries)
+                try:
+                    resp = ai.messages.create(
+                        model="claude-sonnet-4-20250514",
+                        max_tokens=8192,
+                        thinking={"type": "enabled", "budget_tokens": 4096},
+                        system=system_prompt,
+                        messages=messages,
+                    )
+                    raw_text = ""
+                    for block in resp.content:
+                        if block.type == "text":
+                            raw_text = block.text.strip()
+                    if raw_text.startswith("```"):
+                        raw_text = "\n".join(raw_text.split("\n")[1:]).rstrip("`").strip()
+                    result = json.loads(raw_text)
+                    npi_tickets = result.get("tickets", [])
+                    st.session_state["npi_results"] = npi_tickets
+                    st.session_state["npi_summary"] = result.get("summary", "")
+                    # Store conversation history for refinement
+                    messages.append({"role": "assistant", "content": raw_text})
+                    st.session_state["npi_messages"] = messages
+                    # Lookup emails from Intercom for matched tickets
+                    matched_ids = [str(t.get("id", "")).lstrip("sc-") for t in npi_tickets]
+                    email_cache = st.session_state.get("npi_email_cache", {})
+                    new_emails = lookup_emails_for_npi(matched_ids, contacts)
+                    email_cache.update(new_emails)
+                    st.session_state["npi_email_cache"] = email_cache
+                    return True
+                except (json.JSONDecodeError, Exception) as e:
+                    st.error(f"Failed to parse NPI analysis: {e}")
+                    return False
+
+        # Initial NPI analysis when input changes
+        if npi_input and npi_input != st.session_state.get("npi_last_query"):
+            messages = [{"role": "user", "content": npi_input}]
+            if _run_npi_analysis(messages, "Analyzing NPI impact across all tickets…"):
+                st.session_state["npi_last_query"] = npi_input
+                st.session_state.pop("npi_overrides", None)
+                st.rerun()
+
+        # Refinement input (only shown when results exist)
+        if st.session_state.get("npi_results"):
+            refine_input = st.text_input(
+                "Refine results",
+                placeholder="e.g. 'also include tickets about email notifications' or 'remove the Related ones'",
+                key="npi_refine_input",
+                label_visibility="collapsed",
+            )
+            if refine_input:
+                prev_messages = list(st.session_state.get("npi_messages", []))
+                prev_messages.append({"role": "user", "content": refine_input})
+                if _run_npi_analysis(prev_messages, "Refining NPI results…"):
+                    st.rerun()
 
         # ── Filters ──────────────────────────────────────────
         with st.expander("🔍 Search & Filter", expanded=False):
