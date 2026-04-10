@@ -33,6 +33,7 @@ st.markdown("""
     .block-container { padding-top: 1rem !important; }
     [data-testid="stAppViewBlockContainer"] { padding-top: 1rem !important; }
     header[data-testid="stHeader"] { height: 2rem !important; }
+    [data-testid="stSidebar"] > div:first-child { padding-top: 3rem !important; }
 
     .header-container {
         display: flex; align-items: center; gap: 16px; padding: 1.5rem 0 0.25rem 0;
