@@ -1407,9 +1407,9 @@ def build_system_prompt(df: pd.DataFrame, contacts: dict, summaries: dict | None
     ticket_count = len(df) if CHATBOT_MAX_TICKETS is None else min(len(df), CHATBOT_MAX_TICKETS)
     tickets_text = format_tickets_for_context(df, contacts, summaries)
 
-    return f"""You are a product analyst specializing in NPI (New Product Introduction) impact assessment.
+    return f"""You are a product analyst specializing in NPI (New Product Introduction) impact assessment. You have a conversational style — you explain your reasoning and respond to feedback naturally.
 
-You have access to {ticket_count} customer feature request ticket(s). When the user describes an NPI change — a new feature, product update, architectural change, or capability — analyze ALL tickets and identify which ones are relevant or impacted.
+You have access to {ticket_count} customer feature request ticket(s).
 
 ## Feature Request Tickets
 
@@ -1417,22 +1417,27 @@ You have access to {ticket_count} customer feature request ticket(s). When the u
 
 ---
 
-## Your Job
+## Response Format
 
-When the user describes an NPI change, respond with ONLY a JSON object — no markdown, no explanation, no code fences. The JSON must have this exact structure:
+EVERY response must end with a JSON block wrapped in ```json fences. The JSON has this structure:
 
-{{"summary": "1-2 sentence summary of how much demand this NPI covers and any major unaddressed themes", "tickets": [{{"id": "<ticket id>", "relevance": "Direct|Partial|Related", "reason": "one sentence why"}}]}}
+```json
+{{"summary": "1-2 sentence summary", "tickets": [{{"id": "<ticket id>", "relevance": "Direct|Partial|Related", "reason": "one sentence why"}}]}}
+```
 
-Rules:
+BEFORE the JSON block, write a brief conversational message (2-4 sentences) explaining what you found, what changed, or answering the user's question. For example:
+- On initial analysis: "I found 15 tickets that would be impacted. 4 are directly addressed by this change, 6 are partially related, and 5 are in adjacent areas worth considering."
+- On refinement: "Good call — I've reclassified those 3 tickets as Direct since they specifically mention bulk user management. I also found 2 more tickets about list filtering that are relevant."
+
+## Rules
 - "Direct" = the NPI fully or substantially fulfills the request
 - "Partial" = the NPI partially addresses or affects the request
 - "Related" = adjacent area worth considering
 - Be thorough. Include borderline tickets and err on the side of inclusion.
 - Sort by relevance: Direct first, then Partial, then Related.
 - Use the ticket IDs exactly as they appear in the data (e.g. "12345").
-- Return ONLY the JSON object. No other text.
-
-When the user provides follow-up feedback (e.g. "also include tickets about X", "remove the Related ones", "these 3 aren't relevant"), incorporate their feedback and return a COMPLETE updated JSON object with the same structure — not just the changes, but the full revised list of tickets. Merge your previous analysis with the new feedback."""
+- When the user provides feedback, return a COMPLETE updated ticket list — not just changes.
+- Always end with the ```json block, even in follow-ups."""
 
 
 # ============================================================
@@ -1741,7 +1746,7 @@ def main():
 
         st.markdown("---")
 
-        # ── NPI Impact Analysis ──────────────────────────────
+        # ── NPI Impact Analysis (Chat Interface) ─────────────
         st.markdown("""
         <div style="background:linear-gradient(135deg,#1a3a2a,#2D333B);border:2px solid #00E676;
                     border-radius:12px;padding:20px 24px 12px 24px;margin-bottom:16px;">
@@ -1750,89 +1755,120 @@ def main():
                 <span style="color:#00E676;font-size:1.1rem;font-weight:700;">NPI Impact Analysis</span>
             </div>
             <div style="color:#9E9E9E;font-size:0.85rem;margin-bottom:4px;">
-                Describe a product change to find which tickets it would address and who to notify.
+                Describe a product change to find impacted tickets. Chat to refine results.
             </div>
         </div>
         """, unsafe_allow_html=True)
-        npi_col1, npi_col2 = st.columns([5, 1])
-        with npi_col1:
-            npi_input = st.text_input(
-                "🔬 NPI Impact Analysis",
-                placeholder="e.g. 'We're adding bulk PDF export to the reporting module'",
-                label_visibility="collapsed",
-            )
-        with npi_col2:
-            if st.session_state.get("npi_results"):
-                if st.button("✕ Clear NPI", use_container_width=True):
-                    st.session_state.pop("npi_results", None)
-                    st.session_state.pop("npi_summary", None)
-                    st.session_state.pop("npi_overrides", None)
-                    st.session_state.pop("npi_last_query", None)
-                    st.session_state.pop("npi_email_cache", None)
-                    st.session_state.pop("npi_messages", None)
-                    st.rerun()
 
-        def _run_npi_analysis(messages: list[dict], spinner_text: str):
-            """Send messages to Claude and parse NPI results."""
+        # Initialize chat history
+        if "npi_chat" not in st.session_state:
+            st.session_state["npi_chat"] = []  # [{role, content, display}]
+
+        # Clear button
+        if st.session_state.get("npi_chat"):
+            if st.button("✕ Clear NPI", key="npi_clear"):
+                for k in ["npi_results", "npi_summary", "npi_overrides", "npi_last_query",
+                           "npi_email_cache", "npi_messages", "npi_chat"]:
+                    st.session_state.pop(k, None)
+                st.rerun()
+
+        # Display chat history
+        for msg in st.session_state.get("npi_chat", []):
+            with st.chat_message(msg["role"]):
+                st.markdown(msg["display"])
+
+        def _parse_npi_response(raw_text: str) -> tuple[str, dict | None]:
+            """Split response into display message and JSON data."""
+            # Find the JSON block in ```json fences
+            json_match = re.search(r'```json\s*\n?(.*?)\n?\s*```', raw_text, re.DOTALL)
+            if json_match:
+                display_text = raw_text[:json_match.start()].strip()
+                json_str = json_match.group(1).strip()
+            else:
+                # Fallback: try to find raw JSON object
+                brace_start = raw_text.find('{"')
+                if brace_start >= 0:
+                    display_text = raw_text[:brace_start].strip()
+                    json_str = raw_text[brace_start:].strip()
+                else:
+                    return raw_text, None
+            try:
+                return display_text, json.loads(json_str)
+            except json.JSONDecodeError:
+                return raw_text, None
+
+        def _run_npi_chat(user_message: str):
+            """Send a message in the NPI chat and process the response."""
             ai = get_anthropic_client()
             if ai is None:
                 st.error("ANTHROPIC_API_KEY is not configured.")
-                return False
-            with st.spinner(spinner_text):
-                system_prompt = build_system_prompt(df, contacts, summaries)
-                try:
-                    resp = ai.messages.create(
-                        model="claude-sonnet-4-20250514",
-                        max_tokens=8192,
-                        thinking={"type": "enabled", "budget_tokens": 4096},
-                        system=system_prompt,
-                        messages=messages,
-                    )
-                    raw_text = ""
-                    for block in resp.content:
-                        if block.type == "text":
-                            raw_text = block.text.strip()
-                    if raw_text.startswith("```"):
-                        raw_text = "\n".join(raw_text.split("\n")[1:]).rstrip("`").strip()
-                    result = json.loads(raw_text)
+                return
+
+            # Add user message to chat display
+            st.session_state["npi_chat"].append({
+                "role": "user", "content": user_message, "display": user_message,
+            })
+
+            # Build API messages from chat history (use raw content for assistant, not display)
+            api_messages = []
+            for msg in st.session_state["npi_chat"]:
+                api_messages.append({"role": msg["role"], "content": msg["content"]})
+
+            system_prompt = build_system_prompt(df, contacts, summaries)
+            with st.chat_message("assistant"):
+                placeholder = st.empty()
+                placeholder.markdown("Thinking...")
+
+            try:
+                resp = ai.messages.create(
+                    model="claude-sonnet-4-20250514",
+                    max_tokens=8192,
+                    thinking={"type": "enabled", "budget_tokens": 4096},
+                    system=system_prompt,
+                    messages=api_messages,
+                )
+                raw_text = ""
+                for block in resp.content:
+                    if block.type == "text":
+                        raw_text = block.text.strip()
+
+                display_text, result = _parse_npi_response(raw_text)
+
+                if result:
                     npi_tickets = result.get("tickets", [])
                     st.session_state["npi_results"] = npi_tickets
                     st.session_state["npi_summary"] = result.get("summary", "")
-                    # Store conversation history for refinement
-                    messages.append({"role": "assistant", "content": raw_text})
-                    st.session_state["npi_messages"] = messages
-                    # Lookup emails from Intercom for matched tickets
+                    st.session_state["npi_last_query"] = st.session_state["npi_chat"][0]["content"]
+
+                    # Lookup emails for new tickets
                     matched_ids = [str(t.get("id", "")).lstrip("sc-") for t in npi_tickets]
                     email_cache = st.session_state.get("npi_email_cache", {})
                     new_emails = lookup_emails_for_npi(matched_ids, contacts)
                     email_cache.update(new_emails)
                     st.session_state["npi_email_cache"] = email_cache
-                    return True
-                except (json.JSONDecodeError, Exception) as e:
-                    st.error(f"Failed to parse NPI analysis: {e}")
-                    return False
 
-        # Initial NPI analysis when input changes
-        if npi_input and npi_input != st.session_state.get("npi_last_query"):
-            messages = [{"role": "user", "content": npi_input}]
-            if _run_npi_analysis(messages, "Analyzing NPI impact across all tickets…"):
-                st.session_state["npi_last_query"] = npi_input
-                st.session_state.pop("npi_overrides", None)
-                st.rerun()
+                    # Add counts to display
+                    direct_n = sum(1 for t in npi_tickets if t.get("relevance") == "Direct")
+                    partial_n = sum(1 for t in npi_tickets if t.get("relevance") == "Partial")
+                    related_n = sum(1 for t in npi_tickets if t.get("relevance") == "Related")
+                    if not display_text:
+                        display_text = result.get("summary", "Analysis complete.")
+                    display_text += f"\n\n🟢 {direct_n} Direct · 🟡 {partial_n} Partial · 🔴 {related_n} Related"
 
-        # Refinement input (only shown when results exist)
-        if st.session_state.get("npi_results"):
-            refine_input = st.text_input(
-                "Refine results",
-                placeholder="e.g. 'also include tickets about email notifications' or 'remove the Related ones'",
-                key="npi_refine_input",
-                label_visibility="collapsed",
-            )
-            if refine_input:
-                prev_messages = list(st.session_state.get("npi_messages", []))
-                prev_messages.append({"role": "user", "content": refine_input})
-                if _run_npi_analysis(prev_messages, "Refining NPI results…"):
-                    st.rerun()
+                st.session_state["npi_chat"].append({
+                    "role": "assistant", "content": raw_text, "display": display_text or raw_text,
+                })
+
+            except Exception as e:
+                error_msg = f"Error: {e}"
+                st.session_state["npi_chat"].append({
+                    "role": "assistant", "content": error_msg, "display": error_msg,
+                })
+
+        # Chat input
+        if npi_user_input := st.chat_input("Describe an NPI change, or refine the current results…"):
+            _run_npi_chat(npi_user_input)
+            st.rerun()
 
         # ── Filters ──────────────────────────────────────────
         with st.expander("🔍 Search & Filter", expanded=False):
