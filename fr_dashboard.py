@@ -145,6 +145,7 @@ RESULTS_SHEET_ID = os.environ.get(
 )
 CONTACTS_TAB = "Contacts"
 SUMMARIES_TAB = "Summaries"
+NPI_REVIEWS_TAB = "NPI Reviews"
 
 # Progress files are ephemeral (local only, ok to lose on deploy)
 CONTACTS_PROGRESS_FILE = os.path.join(_APP_DIR, "contacts_progress.json")
@@ -779,6 +780,106 @@ def get_anthropic_client():
 
 
 # ============================================================
+# HASURA EMAIL LOOKUP
+# ============================================================
+
+HASURA_ENDPOINT = os.environ.get("HASURA_GRAPHQL_ENDPOINT", "")
+HASURA_ADMIN_SECRET = os.environ.get("HASURA_ADMIN_SECRET", "")
+
+_HASURA_SEARCH_QUERY = """
+query SearchUsers($namePattern: String!) {
+  users(
+    where: {
+      full_name: { _ilike: $namePattern },
+      deleted_at: { _is_null: true },
+      blocked: { _eq: false }
+    },
+    limit: 5,
+    order_by: { last_seen: desc_nulls_last }
+  ) {
+    email
+    full_name
+    company { name }
+  }
+}
+"""
+
+_HASURA_SEARCH_WITH_COMPANY_QUERY = """
+query SearchUsersWithCompany($namePattern: String!, $companyPattern: String!) {
+  users(
+    where: {
+      full_name: { _ilike: $namePattern },
+      company: { name: { _ilike: $companyPattern } },
+      deleted_at: { _is_null: true },
+      blocked: { _eq: false }
+    },
+    limit: 5,
+    order_by: { last_seen: desc_nulls_last }
+  ) {
+    email
+    full_name
+    company { name }
+  }
+}
+"""
+
+
+def _hasura_search_user(name: str, company: str | None = None) -> dict | None:
+    """Search for a user by name (and optionally company) via Hasura GraphQL.
+    Returns {email, full_name, company} for the best match, or None."""
+    if not HASURA_ENDPOINT or not HASURA_ADMIN_SECRET or not name:
+        return None
+    headers = {
+        "Content-Type": "application/json",
+        "x-hasura-admin-secret": HASURA_ADMIN_SECRET,
+    }
+    url = f"{HASURA_ENDPOINT}/v1/graphql"
+    name_pattern = f"%{name.strip()}%"
+    if company:
+        payload = {
+            "query": _HASURA_SEARCH_WITH_COMPANY_QUERY,
+            "variables": {"namePattern": name_pattern, "companyPattern": f"%{company.strip()}%"},
+        }
+    else:
+        payload = {
+            "query": _HASURA_SEARCH_QUERY,
+            "variables": {"namePattern": name_pattern},
+        }
+    try:
+        resp = _http.post(url, json=payload, headers=headers, timeout=10)
+        resp.raise_for_status()
+        users = resp.json().get("data", {}).get("users", [])
+        if users:
+            u = users[0]
+            return {
+                "email": u.get("email", ""),
+                "full_name": u.get("full_name", ""),
+                "company": (u.get("company") or {}).get("name", ""),
+            }
+    except Exception:
+        pass
+    return None
+
+
+def lookup_emails_for_npi(ticket_ids: list[str], contacts: dict) -> dict:
+    """Batch lookup emails from Hasura for NPI-matched tickets.
+    Returns dict: {ticket_id: {email, matched_name, matched_company}}."""
+    results = {}
+    if not HASURA_ENDPOINT or not HASURA_ADMIN_SECRET:
+        return results
+    for tid in ticket_ids:
+        c = contacts.get(tid, {})
+        name = c.get("name")
+        if not name:
+            continue
+        company = c.get("company")
+        match = _hasura_search_user(name, company)
+        if match and match.get("email"):
+            results[tid] = match
+    return results
+
+
+# ============================================================
 # CONTACT EXTRACTION
 # ============================================================
 
@@ -1194,6 +1295,70 @@ def start_summary_extraction(df: pd.DataFrame, ai: anthropic.Anthropic, existing
     t.start()
 
 
+# ============================================================
+# NPI REVIEW PERSISTENCE
+# ============================================================
+
+_NPI_REVIEWS_HEADERS = ["npi_query", "ticket_id", "ai_relevance", "user_relevance", "email", "reviewed_by", "reviewed_at"]
+
+
+def save_npi_review(query: str, overrides: dict, relevance_map: dict, email_cache: dict, reviewer_email: str):
+    """Save NPI review decisions to Google Sheet."""
+    ws = _get_worksheet_cached(NPI_REVIEWS_TAB, _NPI_REVIEWS_HEADERS)
+    if ws is None:
+        return
+    try:
+        # Clear previous reviews for this query
+        existing = ws.get_all_records()
+        # Find rows to delete (in reverse to avoid index shifts)
+        rows_to_delete = []
+        for i, r in enumerate(existing):
+            if str(r.get("npi_query", "")).strip() == query.strip():
+                rows_to_delete.append(i + 2)  # +2: 1-indexed + header row
+        for row_idx in reversed(rows_to_delete):
+            ws.delete_rows(row_idx)
+
+        # Write new review rows — include all tickets, not just overridden ones
+        all_tids = set(list(relevance_map.keys()) + list(overrides.keys()))
+        rows = []
+        now = datetime.now().isoformat()
+        for tid in sorted(all_tids):
+            ov = overrides.get(tid, {})
+            ai_rel = relevance_map.get(tid, "")
+            user_rel = ov.get("relevance", ai_rel)
+            email = ov.get("email", "") or email_cache.get(tid, {}).get("email", "")
+            rows.append([query, tid, ai_rel, user_rel, email, reviewer_email, now])
+        if rows:
+            ws.append_rows(rows, value_input_option="RAW")
+    except Exception as e:
+        print(f"[save_npi_review] Error: {e}")
+
+
+def load_npi_review(query: str) -> dict | None:
+    """Load a saved NPI review for the given query.
+    Returns {ticket_id: {ai_relevance, user_relevance, email, reviewed_by, reviewed_at}} or None."""
+    ws = _get_worksheet_cached(NPI_REVIEWS_TAB, _NPI_REVIEWS_HEADERS)
+    if ws is None:
+        return None
+    try:
+        rows = ws.get_all_records()
+        result = {}
+        for r in rows:
+            if str(r.get("npi_query", "")).strip() == query.strip():
+                tid = str(r.get("ticket_id", ""))
+                if tid:
+                    result[tid] = {
+                        "ai_relevance": r.get("ai_relevance", ""),
+                        "user_relevance": r.get("user_relevance", ""),
+                        "email": r.get("email", ""),
+                        "reviewed_by": r.get("reviewed_by", ""),
+                        "reviewed_at": r.get("reviewed_at", ""),
+                    }
+        return result if result else None
+    except Exception:
+        return None
+
+
 def apply_contacts_to_df(df: pd.DataFrame, contacts: dict) -> pd.DataFrame:
     """Add a 'contact' display column built from extracted contact data."""
     id_col = COLUMNS.get("id", "id")
@@ -1606,6 +1771,9 @@ def main():
                 if st.button("✕ Clear NPI", use_container_width=True):
                     st.session_state.pop("npi_results", None)
                     st.session_state.pop("npi_summary", None)
+                    st.session_state.pop("npi_overrides", None)
+                    st.session_state.pop("npi_last_query", None)
+                    st.session_state.pop("npi_email_cache", None)
                     st.rerun()
 
         # Run NPI analysis when input changes
@@ -1632,9 +1800,15 @@ def main():
                         if raw_text.startswith("```"):
                             raw_text = "\n".join(raw_text.split("\n")[1:]).rstrip("`").strip()
                         result = json.loads(raw_text)
-                        st.session_state["npi_results"] = result.get("tickets", [])
+                        npi_tickets = result.get("tickets", [])
+                        st.session_state["npi_results"] = npi_tickets
                         st.session_state["npi_summary"] = result.get("summary", "")
                         st.session_state["npi_last_query"] = npi_input
+                        st.session_state.pop("npi_overrides", None)
+                        # Lookup emails from Hasura for matched tickets
+                        matched_ids = [str(t.get("id", "")).lstrip("sc-") for t in npi_tickets]
+                        email_cache = lookup_emails_for_npi(matched_ids, contacts)
+                        st.session_state["npi_email_cache"] = email_cache
                         st.rerun()
                     except (json.JSONDecodeError, Exception) as e:
                         st.error(f"Failed to parse NPI analysis: {e}")
@@ -1696,7 +1870,7 @@ def main():
             # Build lookup from NPI results (strip sc- prefix if present)
             relevance_map = {}
             reason_map = {}
-            relevance_order = {"Direct": 0, "Partial": 1, "Related": 2}
+            relevance_order = {"Direct": 0, "Partial": 1, "Related": 2, "Exclude": 3}
             for r in npi_results:
                 tid = str(r.get("id", ""))
                 if tid.startswith("sc-"):
@@ -1708,88 +1882,235 @@ def main():
             npi_ids = set(relevance_map.keys())
             fdf = fdf[fdf[id_col_name].astype(str).isin(npi_ids)]
 
-            # Add relevance columns
+            # Initialize overrides dict — restore from saved review if available
+            if "npi_overrides" not in st.session_state:
+                saved = load_npi_review(st.session_state.get("npi_last_query", ""))
+                if saved:
+                    restored = {}
+                    restored_emails = {}
+                    for tid, data in saved.items():
+                        user_rel = data.get("user_relevance", "")
+                        email = data.get("email", "")
+                        ai_rel = data.get("ai_relevance", "")
+                        if user_rel != ai_rel or email:
+                            restored[tid] = {"relevance": user_rel, "email": email}
+                        if email:
+                            restored_emails[tid] = {"email": email}
+                    st.session_state["npi_overrides"] = restored
+                    # Merge saved emails into cache
+                    existing_cache = st.session_state.get("npi_email_cache", {})
+                    existing_cache.update(restored_emails)
+                    st.session_state["npi_email_cache"] = existing_cache
+                    _reviewer = next((d.get("reviewed_by", "") for d in saved.values() if d.get("reviewed_by")), "")
+                    _reviewed_at = next((d.get("reviewed_at", "") for d in saved.values() if d.get("reviewed_at")), "")
+                    if _reviewed_at:
+                        try:
+                            _reviewed_at = datetime.fromisoformat(_reviewed_at).strftime("%Y-%m-%d %H:%M")
+                        except Exception:
+                            pass
+                    if _reviewer or _reviewed_at:
+                        st.caption(f"Restored previous review (saved by {_reviewer} on {_reviewed_at})")
+                else:
+                    st.session_state["npi_overrides"] = {}
+            overrides = st.session_state["npi_overrides"]
+
+            # Add relevance columns (apply overrides on top of AI results)
             fdf = fdf.copy()
-            fdf["Relevance"] = fdf[id_col_name].astype(str).map(relevance_map).fillna("Related")
+            req_col = COLUMNS.get("submitter", "requester")
+            email_cache = st.session_state.get("npi_email_cache", {})
+
+            def _resolve_relevance(tid):
+                return overrides.get(tid, {}).get("relevance") or relevance_map.get(tid, "Related")
+
+            def _resolve_email(row):
+                tid = str(row.get(id_col_name, ""))
+                ov = overrides.get(tid, {}).get("email")
+                if ov:
+                    return ov
+                cached = email_cache.get(tid, {}).get("email")
+                if cached:
+                    return cached
+                requester = str(row.get(req_col, "")).strip() if req_col and req_col in row.index else ""
+                if requester and INTERNAL_DOMAIN and INTERNAL_DOMAIN not in requester.lower():
+                    return requester
+                return ""
+
+            _indicator_map = {"Direct": "🟢", "Partial": "🟡", "Related": "🔴", "Exclude": "⚫"}
+
+            fdf["Relevance"] = fdf[id_col_name].astype(str).map(_resolve_relevance)
             fdf["Reason"] = fdf[id_col_name].astype(str).map(reason_map).fillna("")
+            fdf["Email"] = fdf.apply(_resolve_email, axis=1)
+            fdf["Requester"] = fdf[req_col].astype(str) if req_col and req_col in fdf.columns else ""
+            fdf[""] = fdf["Relevance"].map(_indicator_map).fillna("🔴")
             fdf["_rel_order"] = fdf["Relevance"].map(relevance_order).fillna(2)
-            fdf = fdf.sort_values("_rel_order")
+            fdf = fdf.sort_values("_rel_order").reset_index(drop=True)
 
             # Show counts by relevance
             direct_n = (fdf["Relevance"] == "Direct").sum()
             partial_n = (fdf["Relevance"] == "Partial").sum()
             related_n = (fdf["Relevance"] == "Related").sum()
-            st.caption(f"NPI matched {len(fdf):,} tickets — {direct_n} Direct · {partial_n} Partial · {related_n} Related")
+            excluded_n = (fdf["Relevance"] == "Exclude").sum()
+            counts_parts = [f"{direct_n} Direct", f"{partial_n} Partial", f"{related_n} Related"]
+            if excluded_n:
+                counts_parts.append(f"{excluded_n} Excluded")
+            st.caption(f"NPI matched {len(fdf):,} tickets — " + " · ".join(counts_parts))
 
-            # Export contacts button
-            contact_rows = []
+            st.markdown(
+                '<span style="font-size:0.8rem;color:#9E9E9E;">'
+                '🟢 Direct = Contact &nbsp;|&nbsp; 🟡 Partial = Review needed &nbsp;|&nbsp; '
+                '🔴 Related = Low priority &nbsp;|&nbsp; ⚫ Exclude = Skip'
+                '</span>', unsafe_allow_html=True,
+            )
+
+            # ── Editable NPI table ────────────────────────────────
             link_col_name = COLUMNS.get("link", "app_url")
             status_col_name = COLUMNS.get("status", "state")
+            title_col_ed = COLUMNS.get("title", "name")
+
+            npi_display_cols = ["", "Relevance", "Email", "Reason"]
+            for k in ["id", "title", "link", "contact", "submitter", "status"]:
+                if k == "contact":
+                    if "contact" in fdf.columns:
+                        npi_display_cols.append("contact")
+                else:
+                    col = COLUMNS.get(k)
+                    if col and col in fdf.columns:
+                        npi_display_cols.append(col)
+            npi_display_cols.append("Requester")
+
+            show_df = fdf[[c for c in npi_display_cols if c in fdf.columns]].copy()
+
+            npi_col_config = {
+                "": st.column_config.TextColumn("", width="small"),
+                "Relevance": st.column_config.SelectboxColumn(
+                    "Relevance",
+                    options=["Direct", "Partial", "Related", "Exclude"],
+                    required=True,
+                    width="small",
+                ),
+                "Email": st.column_config.TextColumn("Email", width="medium"),
+                "Reason": st.column_config.TextColumn("Reason"),
+                "Requester": st.column_config.TextColumn("Filed By", width="medium"),
+            }
+            if link_col_name and link_col_name in show_df.columns:
+                npi_col_config[link_col_name] = st.column_config.LinkColumn("Link", display_text="Shortcut ↗", width="small")
+            if status_col_name and status_col_name in show_df.columns:
+                npi_col_config[status_col_name] = st.column_config.TextColumn("Status", width="small")
+
+            disabled_cols = [c for c in show_df.columns if c not in ("Relevance", "Email")]
+
+            edited_df = st.data_editor(
+                show_df,
+                use_container_width=True,
+                height=450,
+                column_config=npi_col_config,
+                disabled=disabled_cols,
+                hide_index=True,
+                key="npi_editor",
+            )
+
+            # Sync edits back to session state
+            if edited_df is not None:
+                for idx, row in edited_df.iterrows():
+                    tid = str(fdf.iloc[idx][id_col_name]) if idx < len(fdf) else ""
+                    if not tid:
+                        continue
+                    new_rel = row.get("Relevance", "")
+                    new_email = row.get("Email", "")
+                    ai_rel = relevance_map.get(tid, "Related")
+                    if new_rel != ai_rel or new_email:
+                        overrides[tid] = {"relevance": new_rel, "email": new_email}
+                    elif tid in overrides and new_rel == ai_rel and not new_email:
+                        del overrides[tid]
+                st.session_state["npi_overrides"] = overrides
+
+            # ── Export contacts ────────────────────────────────────
+            contact_rows = []
             for _, row in fdf.iterrows():
                 tid = str(row.get(id_col_name, ""))
+                final_rel = overrides.get(tid, {}).get("relevance") or relevance_map.get(tid, "Related")
+                if final_rel == "Exclude":
+                    continue
                 c = contacts.get(tid, {})
+                email = overrides.get(tid, {}).get("email") or row.get("Email", "")
                 name = c.get("name") or ""
                 company = c.get("company") or ""
-                role = c.get("role") or ""
-                if name:
+                if name or email:
                     contact_rows.append({
                         "Name": name,
                         "Company": company,
-                        "Role": role,
+                        "Role": c.get("role") or "",
+                        "Email": email,
                         "Ticket": _get(row, "title"),
+                        "Ticket ID": tid,
                         "Status": str(row.get(status_col_name, "")) if status_col_name and status_col_name in row.index else "",
                         "Shortcut Link": str(row.get(link_col_name, "")) if link_col_name and link_col_name in row.index else "",
-                        "Relevance": relevance_map.get(tid, ""),
+                        "Relevance": final_rel,
                     })
-            if contact_rows:
-                contact_df = pd.DataFrame(contact_rows)
-                buf = io.StringIO()
-                contact_df.to_csv(buf, index=False)
-                st.download_button(
-                    f"📧 Export {len(contact_rows)} Contact(s)",
-                    buf.getvalue(),
-                    file_name=f"npi_contacts_{datetime.now().strftime('%Y%m%d')}.csv",
-                    mime="text/csv",
-                )
+
+            email_count = sum(1 for r in contact_rows if r.get("Email"))
+            exp_col1, exp_col2, exp_col3 = st.columns([1, 1, 2])
+            with exp_col1:
+                if contact_rows:
+                    contact_export_df = pd.DataFrame(contact_rows)
+                    buf = io.StringIO()
+                    contact_export_df.to_csv(buf, index=False)
+                    label = f"📧 Export {len(contact_rows)} Contact(s)"
+                    if email_count:
+                        label += f" — {email_count} with email"
+                    st.download_button(
+                        label,
+                        buf.getvalue(),
+                        file_name=f"npi_contacts_{datetime.now().strftime('%Y%m%d')}.csv",
+                        mime="text/csv",
+                        use_container_width=True,
+                    )
+            with exp_col2:
+                _auth_user = st.session_state.get("_auth_user", {})
+                if st.button("💾 Save Review", use_container_width=True):
+                    save_npi_review(
+                        query=st.session_state.get("npi_last_query", ""),
+                        overrides=overrides,
+                        relevance_map=relevance_map,
+                        email_cache=email_cache,
+                        reviewer_email=_auth_user.get("email", "unknown"),
+                    )
+                    st.success("Review saved.")
+
         else:
             if len(fdf) != len(df):
                 st.caption(f"Showing {len(fdf):,} of {len(df):,} tickets")
 
-        # ── Table ─────────────────────────────────────────────
-        all_display_keys = DISPLAY_KEYS
-        display_cols = []
+            # ── Standard read-only table ──────────────────────────
+            all_display_keys = DISPLAY_KEYS
+            display_cols = []
 
-        # If NPI is active, prepend Relevance and Reason columns
-        if npi_active:
-            display_cols = ["Relevance", "Reason"]
+            for k in all_display_keys:
+                if k == "contact":
+                    if "contact" in fdf.columns:
+                        display_cols.append("contact")
+                else:
+                    col = COLUMNS.get(k)
+                    if col and col in fdf.columns:
+                        display_cols.append(col)
 
-        for k in all_display_keys:
-            if k == "contact":
-                if "contact" in fdf.columns:
-                    display_cols.append("contact")
-            else:
-                col = COLUMNS.get(k)
-                if col and col in fdf.columns:
-                    display_cols.append(col)
+            if not display_cols:
+                display_cols = list(fdf.columns[:6])
 
-        if not display_cols:
-            display_cols = list(fdf.columns[:6])
+            show_df = fdf[[c for c in display_cols if c in fdf.columns]]
 
-        # Remove internal sort column from display
-        show_df = fdf[[c for c in display_cols if c in fdf.columns]]
+            col_config = {}
+            link_col = COLUMNS.get("link", "")
+            if link_col and link_col in show_df.columns:
+                col_config[link_col] = st.column_config.LinkColumn(
+                    "Link",
+                    display_text="Shortcut Link",
+                )
+            status_col = COLUMNS.get("status", "")
+            if status_col and status_col in show_df.columns:
+                col_config[status_col] = st.column_config.TextColumn("Status")
 
-        col_config = {}
-        link_col = COLUMNS.get("link", "")
-        if link_col and link_col in show_df.columns:
-            col_config[link_col] = st.column_config.LinkColumn(
-                "Link",
-                display_text="Shortcut Link",
-            )
-        status_col = COLUMNS.get("status", "")
-        if status_col and status_col in show_df.columns:
-            col_config[status_col] = st.column_config.TextColumn("Status")
-
-        st.dataframe(show_df, use_container_width=True, height=380, column_config=col_config)
+            st.dataframe(show_df, use_container_width=True, height=380, column_config=col_config)
 
         # ── Detail view ───────────────────────────────────────
         st.markdown("---")
