@@ -33,7 +33,6 @@ st.markdown("""
     .block-container { padding-top: 1rem !important; }
     [data-testid="stAppViewBlockContainer"] { padding-top: 1rem !important; }
     header[data-testid="stHeader"] { height: 2rem !important; }
-    [data-testid="stSidebar"] > div:first-child { padding-top: 3rem !important; }
 
     .header-container {
         display: flex; align-items: center; gap: 16px; padding: 1.5rem 0 0.25rem 0;
@@ -1526,33 +1525,59 @@ def main():
     app_dir = os.path.dirname(os.path.abspath(__file__))
     logo_path = os.path.join(app_dir, "logo.svg")
 
-    hdr_left, hdr_right = st.columns([3, 1])
-    with hdr_left:
-        if os.path.exists(logo_path):
-            with open(logo_path, "r") as f:
-                logo_svg = f.read()
-            logo_b64 = base64.b64encode(logo_svg.encode()).decode()
-            st.markdown(f"""
-            <div class="header-container">
-                <img src="data:image/svg+xml;base64,{logo_b64}" />
-                <h1>Feature Request Dashboard</h1>
-            </div>
-            """, unsafe_allow_html=True)
-        else:
-            st.markdown('<h1 style="color:#00E676;">Feature Request Dashboard</h1>', unsafe_allow_html=True)
-        st.markdown('<div class="header-subtitle">Customer feature requests from Shortcut · NPI impact analysis</div>', unsafe_allow_html=True)
-    with hdr_right:
-        c1, c2 = st.columns(2)
-        with c1:
-            if st.button("🔄 Refresh", use_container_width=True):
-                st.cache_data.clear()
-                st.cache_resource.clear()
-                st.rerun()
-        with c2:
-            if st.button("Sign out", use_container_width=True):
-                del st.session_state["_auth_user"]
-                _clear_auth_cookie()
-                st.rerun()
+    # Top-right action bar (fixed in the Streamlit header area)
+    st.markdown(f"""
+    <style>
+        .top-action-bar {{
+            position: fixed; top: 6px; right: 60px; z-index: 999999;
+            display: flex; gap: 8px; align-items: center;
+        }}
+        .top-action-bar button {{
+            background: #373E47; color: #E0E0E0; border: 1px solid #444C56;
+            border-radius: 6px; padding: 4px 14px; font-size: 0.82rem;
+            cursor: pointer; font-family: inherit; white-space: nowrap;
+        }}
+        .top-action-bar button:hover {{ background: #444C56; }}
+        .top-action-bar .user-label {{
+            color: #9E9E9E; font-size: 0.78rem; margin-right: 4px;
+        }}
+    </style>
+    <div class="top-action-bar">
+        <span class="user-label">{_user_email}</span>
+        <form action="" method="get" style="margin:0;">
+            <button type="submit" name="_refresh" value="1">🔄 Refresh</button>
+        </form>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # Handle refresh via query param
+    if st.query_params.get("_refresh"):
+        st.query_params.clear()
+        st.cache_data.clear()
+        st.cache_resource.clear()
+        st.rerun()
+
+    # Sign out button (needs Streamlit state, so use a real st.button in a small column)
+    _so_spacer, _so_btn = st.columns([9, 1])
+    with _so_btn:
+        if st.button("Sign out", key="_signout_top"):
+            del st.session_state["_auth_user"]
+            _clear_auth_cookie()
+            st.rerun()
+
+    if os.path.exists(logo_path):
+        with open(logo_path, "r") as f:
+            logo_svg = f.read()
+        logo_b64 = base64.b64encode(logo_svg.encode()).decode()
+        st.markdown(f"""
+        <div class="header-container">
+            <img src="data:image/svg+xml;base64,{logo_b64}" />
+            <h1>Feature Request Dashboard</h1>
+        </div>
+        """, unsafe_allow_html=True)
+    else:
+        st.markdown('<h1 style="color:#00E676;">Feature Request Dashboard</h1>', unsafe_allow_html=True)
+    st.markdown('<div class="header-subtitle">Customer feature requests from Shortcut · NPI impact analysis</div>', unsafe_allow_html=True)
 
     # ── Load data ────────────────────────────────────────────
     with st.spinner("Loading feature requests…"):
