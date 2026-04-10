@@ -2191,6 +2191,134 @@ def main():
                     )
                     st.success("Review saved.")
 
+            # ── Draft outreach messages ────────────────────────────
+            with st.expander("📝 Draft Outreach Messages", expanded=False):
+                npi_link = st.text_input(
+                    "NPI Announcement Link",
+                    placeholder="https://fieldguide.com/changelog/...",
+                    key="npi_announcement_link",
+                )
+
+                _draft_ov = _get_current_overrides()
+                # Build list of contacts to message (Direct + Partial with a name)
+                _draft_candidates = []
+                desc_col = resolve_col("description", fdf)
+                for _, row in fdf.iterrows():
+                    tid = str(row.get(id_col_name, ""))
+                    final_rel = _draft_ov.get(tid, {}).get("relevance") or relevance_map.get(tid, "Related")
+                    if final_rel in ("Exclude", "Related"):
+                        continue
+                    c = contacts.get(tid, {})
+                    name = c.get("name") or ""
+                    if not name:
+                        continue
+                    first_name = name.split()[0] if name else ""
+                    email = _draft_ov.get(tid, {}).get("email") or _resolve_email(row)
+                    title = _get(row, "title")
+                    description = str(row.get(desc_col, ""))[:500] if desc_col and desc_col in row.index else ""
+                    _draft_candidates.append({
+                        "tid": tid, "name": name, "first_name": first_name,
+                        "email": email, "title": title, "description": description,
+                        "relevance": final_rel, "company": c.get("company") or "",
+                    })
+
+                if not _draft_candidates:
+                    st.info("No Direct or Partial contacts with names to draft messages for. Change ticket relevance above to include them.")
+                else:
+                    st.caption(f"{len(_draft_candidates)} contacts to message")
+
+                    if st.button("✨ Generate Drafts", use_container_width=True, key="gen_drafts"):
+                        ai = get_anthropic_client()
+                        if ai is None:
+                            st.error("ANTHROPIC_API_KEY is not configured.")
+                        else:
+                            with st.spinner("Drafting personalized messages…"):
+                                # Build a batch prompt for all contacts
+                                contact_lines = []
+                                for dc in _draft_candidates:
+                                    contact_lines.append(
+                                        f"[{dc['tid']}] Contact: {dc['name']} ({dc['company']})\n"
+                                        f"Ticket: {dc['title']}\n"
+                                        f"Description: {dc['description']}"
+                                    )
+                                contacts_text = ("\n" + "=" * 40 + "\n").join(contact_lines)
+
+                                draft_prompt = f"""For each contact below, write a one-sentence summary of the feedback they submitted. The summary should be specific to their ticket — not generic. Write from the perspective of someone who read their feature request.
+
+Contacts and their tickets:
+
+{contacts_text}
+
+Respond with a JSON array — one object per contact, in the same order:
+[{{"id": "<ticket id>", "feedback_summary": "a concise summary of what they asked for"}}]
+No other text."""
+
+                                try:
+                                    resp = ai.messages.create(
+                                        model="claude-haiku-4-5-20251001",
+                                        max_tokens=4096,
+                                        messages=[{"role": "user", "content": draft_prompt}],
+                                    )
+                                    raw = resp.content[0].text.strip()
+                                    if raw.startswith("```"):
+                                        raw = "\n".join(raw.split("\n")[1:]).rstrip("`").strip()
+                                    summaries_list = json.loads(raw)
+                                    summary_map = {str(s.get("id", "")): s.get("feedback_summary", "") for s in summaries_list}
+                                    st.session_state["npi_draft_summaries"] = summary_map
+                                except Exception as e:
+                                    st.error(f"Failed to generate drafts: {e}")
+
+                    # Display generated drafts
+                    draft_summaries = st.session_state.get("npi_draft_summaries", {})
+                    if draft_summaries:
+                        _link_text = f"\n\n[Check it out here]({npi_link})" if npi_link else "\n\nCheck it out here (link pending)."
+                        all_drafts = []
+                        for dc in _draft_candidates:
+                            summary = draft_summaries.get(dc["tid"], "your recent product feedback")
+                            draft = (
+                                f"{dc['first_name']},\n\n"
+                                f"Thank you for submitting product feedback regarding {summary}. "
+                                f"We value your input and wanted to notify you that our team has built out "
+                                f"a feature that will impact the feedback you provided us."
+                                f"{_link_text}\n\n"
+                                f"As always, we'd love to hear what you think or if there's anything else "
+                                f"you'd like to see.\n\n"
+                                f"Cheers,\nThe Fieldguide Team"
+                            )
+                            all_drafts.append({"name": dc["name"], "email": dc["email"], "draft": draft, "tid": dc["tid"]})
+
+                            st.markdown(f"**To:** {dc['name']}" + (f" ({dc['email']})" if dc['email'] else " _(no email)_"))
+                            st.text_area(
+                                f"Draft for {dc['name']}",
+                                value=draft,
+                                height=200,
+                                key=f"draft_{dc['tid']}",
+                                label_visibility="collapsed",
+                            )
+                            st.markdown("---")
+
+                        # Export all drafts as CSV
+                        if all_drafts:
+                            drafts_export = []
+                            for d in all_drafts:
+                                # Use the text_area value (in case user edited it)
+                                edited_draft = st.session_state.get(f"draft_{d['tid']}", d["draft"])
+                                drafts_export.append({
+                                    "Name": d["name"],
+                                    "Email": d["email"],
+                                    "Message": edited_draft,
+                                })
+                            drafts_df = pd.DataFrame(drafts_export)
+                            buf = io.StringIO()
+                            drafts_df.to_csv(buf, index=False)
+                            st.download_button(
+                                f"📧 Export {len(drafts_export)} Draft Message(s)",
+                                buf.getvalue(),
+                                file_name=f"npi_drafts_{datetime.now().strftime('%Y%m%d')}.csv",
+                                mime="text/csv",
+                                use_container_width=True,
+                            )
+
         else:
             if len(fdf) != len(df):
                 st.caption(f"Showing {len(fdf):,} of {len(df):,} tickets")
