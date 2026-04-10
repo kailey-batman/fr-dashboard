@@ -780,100 +780,84 @@ def get_anthropic_client():
 
 
 # ============================================================
-# HASURA EMAIL LOOKUP
+# INTERCOM EMAIL LOOKUP
 # ============================================================
 
-HASURA_ENDPOINT = os.environ.get("HASURA_GRAPHQL_ENDPOINT", "")
-HASURA_ADMIN_SECRET = os.environ.get("HASURA_ADMIN_SECRET", "")
-
-_HASURA_SEARCH_QUERY = """
-query SearchUsers($namePattern: String!) {
-  users(
-    where: {
-      full_name: { _ilike: $namePattern },
-      deleted_at: { _is_null: true },
-      blocked: { _eq: false }
-    },
-    limit: 5,
-    order_by: { last_seen: desc_nulls_last }
-  ) {
-    email
-    full_name
-    company { name }
-  }
-}
-"""
-
-_HASURA_SEARCH_WITH_COMPANY_QUERY = """
-query SearchUsersWithCompany($namePattern: String!, $companyPattern: String!) {
-  users(
-    where: {
-      full_name: { _ilike: $namePattern },
-      company: { name: { _ilike: $companyPattern } },
-      deleted_at: { _is_null: true },
-      blocked: { _eq: false }
-    },
-    limit: 5,
-    order_by: { last_seen: desc_nulls_last }
-  ) {
-    email
-    full_name
-    company { name }
-  }
-}
-"""
+INTERCOM_API_TOKEN = os.environ.get("INTERCOM_API_TOKEN", "")
 
 
-def _hasura_search_user(name: str, company: str | None = None) -> dict | None:
-    """Search for a user by name (and optionally company) via Hasura GraphQL.
-    Returns {email, full_name, company} for the best match, or None."""
-    if not HASURA_ENDPOINT or not HASURA_ADMIN_SECRET or not name:
+def _intercom_search_contact(name: str, company: str | None = None) -> dict | None:
+    """Search Intercom contacts by name. Returns {email, full_name, company} or None."""
+    if not INTERCOM_API_TOKEN or not name:
         return None
     headers = {
         "Content-Type": "application/json",
-        "x-hasura-admin-secret": HASURA_ADMIN_SECRET,
+        "Authorization": f"Bearer {INTERCOM_API_TOKEN}",
+        "Intercom-Version": "2.11",
     }
-    url = f"{HASURA_ENDPOINT}/v1/graphql"
-    name_pattern = f"%{name.strip()}%"
-    if company:
-        payload = {
-            "query": _HASURA_SEARCH_WITH_COMPANY_QUERY,
-            "variables": {"namePattern": name_pattern, "companyPattern": f"%{company.strip()}%"},
-        }
-    else:
-        payload = {
-            "query": _HASURA_SEARCH_QUERY,
-            "variables": {"namePattern": name_pattern},
-        }
+    # Search by name
+    payload = {
+        "query": {
+            "field": "name",
+            "operator": "~",
+            "value": name.strip(),
+        },
+    }
     try:
-        resp = _http.post(url, json=payload, headers=headers, timeout=10)
+        resp = _http.post(
+            "https://api.intercom.io/contacts/search",
+            json=payload, headers=headers, timeout=10,
+        )
         resp.raise_for_status()
-        users = resp.json().get("data", {}).get("users", [])
-        if users:
-            u = users[0]
-            return {
-                "email": u.get("email", ""),
-                "full_name": u.get("full_name", ""),
-                "company": (u.get("company") or {}).get("name", ""),
-            }
+        contacts_list = resp.json().get("data", [])
+        if not contacts_list:
+            return None
+        # If company is known, prefer a match with matching company
+        if company:
+            company_lower = company.strip().lower()
+            for c in contacts_list:
+                c_company = (c.get("company") or {}).get("name", "")
+                if not c_company:
+                    # Check companies list
+                    for co in c.get("companies", {}).get("data", []):
+                        if company_lower in co.get("name", "").lower():
+                            c_company = co.get("name", "")
+                            break
+                if company_lower in c_company.lower():
+                    return {
+                        "email": c.get("email", ""),
+                        "full_name": c.get("name", ""),
+                        "company": c_company,
+                    }
+        # Fall back to first result with an email
+        for c in contacts_list:
+            if c.get("email"):
+                return {
+                    "email": c.get("email", ""),
+                    "full_name": c.get("name", ""),
+                    "company": "",
+                }
     except Exception:
         pass
     return None
 
 
 def lookup_emails_for_npi(ticket_ids: list[str], contacts: dict) -> dict:
-    """Batch lookup emails from Hasura for NPI-matched tickets.
+    """Batch lookup emails from Intercom for NPI-matched tickets.
     Returns dict: {ticket_id: {email, matched_name, matched_company}}."""
     results = {}
-    if not HASURA_ENDPOINT or not HASURA_ADMIN_SECRET:
+    if not INTERCOM_API_TOKEN:
         return results
     for tid in ticket_ids:
         c = contacts.get(tid, {})
         name = c.get("name")
         if not name:
             continue
+        # Skip if we already have an email from extraction
+        if c.get("email"):
+            continue
         company = c.get("company")
-        match = _hasura_search_user(name, company)
+        match = _intercom_search_contact(name, company)
         if match and match.get("email"):
             results[tid] = match
     return results
