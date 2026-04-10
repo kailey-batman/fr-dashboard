@@ -883,7 +883,7 @@ def lookup_emails_for_npi(ticket_ids: list[str], contacts: dict) -> dict:
 # CONTACT EXTRACTION
 # ============================================================
 
-_CONTACTS_HEADERS = ["ticket_id", "is_customer_ticket", "name", "company", "role"]
+_CONTACTS_HEADERS = ["ticket_id", "is_customer_ticket", "name", "company", "role", "email"]
 
 
 def _load_contacts_from_sheet() -> dict:
@@ -902,6 +902,7 @@ def _load_contacts_from_sheet() -> dict:
                     "name": r.get("name") or None,
                     "company": r.get("company") or None,
                     "role": r.get("role") or None,
+                    "email": r.get("email") or None,
                 }
         return result
     except Exception as e:
@@ -930,6 +931,7 @@ def save_contacts(contacts: dict):
                     c.get("name") or "",
                     c.get("company") or "",
                     c.get("role") or "",
+                    c.get("email") or "",
                 ])
             ws.clear()
             ws.update(values=rows, value_input_option="RAW")
@@ -952,6 +954,7 @@ def append_contacts(batch_contacts: dict):
                     c.get("name") or "",
                     c.get("company") or "",
                     c.get("role") or "",
+                    c.get("email") or "",
                 ])
             if rows:
                 ws.append_rows(rows, value_input_option="RAW")
@@ -987,42 +990,21 @@ def _analyze_batch(ai: anthropic.Anthropic, batch: list[dict]) -> list[dict]:
         ticket_lines.append(
             f"[{t['id']}] Title: {t['title']}\n"
             f"Requester: {t['requester']}\n"
-            f"Description: {t['description'][:600]}"
+            f"Description: {t['description'][:1200]}"
         )
 
-    prompt = f"""You are reviewing Shortcut feature request tickets. For each ticket determine:
-1. Is it customer-driven? (A real customer/client/account requested it, even if filed internally on their behalf.)
-2. Is there a named contact person to notify? (e.g. "Britni from Wipfli suggested this")
-
-Tickets:
-
-{"=" * 60}
-{"=" * 60 + chr(10) + "=" * 60 + chr(10)}.join(ticket_lines)
-
-Respond with a JSON array — one object per ticket, in the same order:
-[
-  {{
-    "id": "<ticket id>",
-    "is_customer_ticket": true or false,
-    "name": "First Last or null",
-    "company": "Company or null",
-    "role": "role or null"
-  }}
-]
-No other text."""
-
-    # Build the prompt properly
     tickets_text = ("\n" + "=" * 60 + "\n").join(ticket_lines)
     prompt = f"""You are reviewing Shortcut feature request tickets. For each ticket determine:
 1. Is it customer-driven? (A real customer/client/account requested it, even if filed internally on their behalf.)
 2. Is there a named contact person to notify? (e.g. "Britni from Wipfli suggested this")
+3. Is there an email address for the customer contact? Look for explicit "Email:" fields, email addresses in the description, or any email that is NOT @fieldguide.io. If the requester email is external (not @fieldguide.io), use that.
 
 Tickets:
 
 {tickets_text}
 
 Respond with a JSON array — one object per ticket, in the same order:
-[{{"id": "<id>", "is_customer_ticket": true/false, "name": "or null", "company": "or null", "role": "or null"}}]
+[{{"id": "<id>", "is_customer_ticket": true/false, "name": "or null", "company": "or null", "role": "or null", "email": "or null"}}]
 No other text."""
 
     try:
@@ -1037,7 +1019,7 @@ No other text."""
         return json.loads(text)
     except Exception:
         # On failure mark all as customer tickets (safe default — don't hide anything)
-        return [{"id": t["id"], "is_customer_ticket": True, "name": None, "company": None, "role": None} for t in batch]
+        return [{"id": t["id"], "is_customer_ticket": True, "name": None, "company": None, "role": None, "email": None} for t in batch]
 
 
 def _run_contact_extraction_thread(df: pd.DataFrame, ai: anthropic.Anthropic, existing_contacts: dict):
@@ -1083,7 +1065,7 @@ def _run_contact_extraction_thread(df: pd.DataFrame, ai: anthropic.Anthropic, ex
             requester   = str(row.get(req_col, ""))
 
             if _is_internal_heuristic(requester, description):
-                entry = {"is_customer_ticket": False, "name": None, "company": None, "role": None}
+                entry = {"is_customer_ticket": False, "name": None, "company": None, "role": None, "email": None}
                 contacts[ticket_id] = entry
                 heuristic_batch[ticket_id] = entry
             else:
@@ -1107,6 +1089,7 @@ def _run_contact_extraction_thread(df: pd.DataFrame, ai: anthropic.Anthropic, ex
                     "name":    r.get("name"),
                     "company": r.get("company"),
                     "role":    r.get("role"),
+                    "email":   r.get("email"),
                 }
                 contacts[tid] = c
                 batch_results[tid] = c
@@ -1924,12 +1907,19 @@ def main():
 
             def _resolve_email(row):
                 tid = str(row.get(id_col_name, ""))
+                # 1. User override
                 ov = overrides.get(tid, {}).get("email")
                 if ov:
                     return ov
+                # 2. Hasura lookup cache
                 cached = email_cache.get(tid, {}).get("email")
                 if cached:
                     return cached
+                # 3. Email extracted from ticket by contact analysis
+                contact_email = (contacts.get(tid) or {}).get("email")
+                if contact_email:
+                    return contact_email
+                # 4. External requester email
                 requester = str(row.get(req_col, "")).strip() if req_col and req_col in row.index else ""
                 if requester and INTERNAL_DOMAIN and INTERNAL_DOMAIN not in requester.lower():
                     return requester
