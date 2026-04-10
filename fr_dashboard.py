@@ -1962,120 +1962,141 @@ def main():
                 '</span>', unsafe_allow_html=True,
             )
 
-            # ── Editable NPI table ────────────────────────────────
+            # ── Editable NPI table (fragment to avoid full-page rerun) ──
             link_col_name = COLUMNS.get("link", "app_url")
             status_col_name = COLUMNS.get("status", "state")
-            title_col_ed = COLUMNS.get("title", "name")
 
-            npi_display_cols = ["", "Relevance", "Email", "Reason"]
-            for k in ["id", "title", "link", "contact", "submitter", "status"]:
-                if k == "contact":
-                    if "contact" in fdf.columns:
-                        npi_display_cols.append("contact")
-                else:
-                    col = COLUMNS.get(k)
-                    if col and col in fdf.columns:
-                        npi_display_cols.append(col)
-            npi_display_cols.append("Requester")
+            # Pre-build the ticket ID list for the sync logic
+            _fdf_tids = fdf[id_col_name].astype(str).tolist()
 
-            show_df = fdf[[c for c in npi_display_cols if c in fdf.columns]].copy()
+            @st.fragment
+            def _npi_editor_fragment():
+                _overrides = st.session_state.get("npi_overrides", {})
+                _indicator_map_f = {"Direct": "🟢", "Partial": "🟡", "Related": "🔴", "Exclude": "⚫"}
 
-            npi_col_config = {
-                "": st.column_config.TextColumn("", width="small"),
-                "Relevance": st.column_config.SelectboxColumn(
-                    "Relevance",
-                    options=["Direct", "Partial", "Related", "Exclude"],
-                    required=True,
-                    width="small",
-                ),
-                "Email": st.column_config.TextColumn("Email", width="medium"),
-                "Reason": st.column_config.TextColumn("Reason"),
-                "Requester": st.column_config.TextColumn("Filed By", width="medium"),
-            }
-            if link_col_name and link_col_name in show_df.columns:
-                npi_col_config[link_col_name] = st.column_config.LinkColumn("Link", display_text="Shortcut ↗", width="small")
-            if status_col_name and status_col_name in show_df.columns:
-                npi_col_config[status_col_name] = st.column_config.TextColumn("Status", width="small")
+                # Rebuild display df from current overrides
+                _show = fdf.copy()
+                _show["Relevance"] = _show[id_col_name].astype(str).map(
+                    lambda t: _overrides.get(t, {}).get("relevance") or relevance_map.get(t, "Related")
+                )
+                _show["Email"] = _show.apply(lambda r: _resolve_email(r), axis=1)
+                _show[""] = _show["Relevance"].map(_indicator_map_f).fillna("🔴")
 
-            disabled_cols = [c for c in show_df.columns if c not in ("Relevance", "Email")]
+                npi_display_cols = ["", "Relevance", "Email", "Reason"]
+                for k in ["id", "title", "link", "contact", "submitter", "status"]:
+                    if k == "contact":
+                        if "contact" in _show.columns:
+                            npi_display_cols.append("contact")
+                    else:
+                        col = COLUMNS.get(k)
+                        if col and col in _show.columns:
+                            npi_display_cols.append(col)
+                npi_display_cols.append("Requester")
 
-            edited_df = st.data_editor(
-                show_df,
-                use_container_width=True,
-                height=450,
-                column_config=npi_col_config,
-                disabled=disabled_cols,
-                hide_index=True,
-                key="npi_editor",
-            )
+                display_df = _show[[c for c in npi_display_cols if c in _show.columns]].copy()
 
-            # Sync edits back to session state
-            if edited_df is not None:
-                for idx, row in edited_df.iterrows():
-                    tid = str(fdf.iloc[idx][id_col_name]) if idx < len(fdf) else ""
-                    if not tid:
+                npi_col_config = {
+                    "": st.column_config.TextColumn("", width="small"),
+                    "Relevance": st.column_config.SelectboxColumn(
+                        "Relevance",
+                        options=["Direct", "Partial", "Related", "Exclude"],
+                        required=True,
+                        width="small",
+                    ),
+                    "Email": st.column_config.TextColumn("Email", width="medium"),
+                    "Reason": st.column_config.TextColumn("Reason"),
+                    "Requester": st.column_config.TextColumn("Filed By", width="medium"),
+                }
+                if link_col_name and link_col_name in display_df.columns:
+                    npi_col_config[link_col_name] = st.column_config.LinkColumn("Link", display_text="Shortcut ↗", width="small")
+                if status_col_name and status_col_name in display_df.columns:
+                    npi_col_config[status_col_name] = st.column_config.TextColumn("Status", width="small")
+
+                disabled_cols = [c for c in display_df.columns if c not in ("Relevance", "Email")]
+
+                st.data_editor(
+                    display_df,
+                    use_container_width=True,
+                    height=450,
+                    column_config=npi_col_config,
+                    disabled=disabled_cols,
+                    hide_index=True,
+                    key="npi_editor",
+                )
+
+                # Sync edits using the delta from session state (fast — only changed rows)
+                editor_state = st.session_state.get("npi_editor", {})
+                edited_rows = editor_state.get("edited_rows", {})
+                if edited_rows:
+                    for row_idx_str, changes in edited_rows.items():
+                        row_idx = int(row_idx_str)
+                        if row_idx >= len(_fdf_tids):
+                            continue
+                        tid = _fdf_tids[row_idx]
+                        current = _overrides.get(tid, {})
+                        new_rel = changes.get("Relevance", current.get("relevance") or relevance_map.get(tid, "Related"))
+                        new_email = changes.get("Email", current.get("email", ""))
+                        ai_rel = relevance_map.get(tid, "Related")
+                        if new_rel != ai_rel or new_email:
+                            _overrides[tid] = {"relevance": new_rel, "email": new_email}
+                        elif tid in _overrides and new_rel == ai_rel and not new_email:
+                            del _overrides[tid]
+                    st.session_state["npi_overrides"] = _overrides
+
+                # ── Export contacts ────────────────────────────────────
+                contact_rows = []
+                for _, row in fdf.iterrows():
+                    tid = str(row.get(id_col_name, ""))
+                    final_rel = _overrides.get(tid, {}).get("relevance") or relevance_map.get(tid, "Related")
+                    if final_rel == "Exclude":
                         continue
-                    new_rel = row.get("Relevance", "")
-                    new_email = row.get("Email", "")
-                    ai_rel = relevance_map.get(tid, "Related")
-                    if new_rel != ai_rel or new_email:
-                        overrides[tid] = {"relevance": new_rel, "email": new_email}
-                    elif tid in overrides and new_rel == ai_rel and not new_email:
-                        del overrides[tid]
-                st.session_state["npi_overrides"] = overrides
+                    c = contacts.get(tid, {})
+                    email = _overrides.get(tid, {}).get("email") or _resolve_email(row)
+                    name = c.get("name") or ""
+                    company = c.get("company") or ""
+                    if name or email:
+                        contact_rows.append({
+                            "Name": name,
+                            "Company": company,
+                            "Role": c.get("role") or "",
+                            "Email": email,
+                            "Ticket": _get(row, "title"),
+                            "Ticket ID": tid,
+                            "Status": str(row.get(status_col_name, "")) if status_col_name and status_col_name in row.index else "",
+                            "Shortcut Link": str(row.get(link_col_name, "")) if link_col_name and link_col_name in row.index else "",
+                            "Relevance": final_rel,
+                        })
 
-            # ── Export contacts ────────────────────────────────────
-            contact_rows = []
-            for _, row in fdf.iterrows():
-                tid = str(row.get(id_col_name, ""))
-                final_rel = overrides.get(tid, {}).get("relevance") or relevance_map.get(tid, "Related")
-                if final_rel == "Exclude":
-                    continue
-                c = contacts.get(tid, {})
-                email = overrides.get(tid, {}).get("email") or row.get("Email", "")
-                name = c.get("name") or ""
-                company = c.get("company") or ""
-                if name or email:
-                    contact_rows.append({
-                        "Name": name,
-                        "Company": company,
-                        "Role": c.get("role") or "",
-                        "Email": email,
-                        "Ticket": _get(row, "title"),
-                        "Ticket ID": tid,
-                        "Status": str(row.get(status_col_name, "")) if status_col_name and status_col_name in row.index else "",
-                        "Shortcut Link": str(row.get(link_col_name, "")) if link_col_name and link_col_name in row.index else "",
-                        "Relevance": final_rel,
-                    })
+                email_count = sum(1 for r in contact_rows if r.get("Email"))
+                exp_col1, exp_col2, exp_col3 = st.columns([1, 1, 2])
+                with exp_col1:
+                    if contact_rows:
+                        contact_export_df = pd.DataFrame(contact_rows)
+                        buf = io.StringIO()
+                        contact_export_df.to_csv(buf, index=False)
+                        label = f"📧 Export {len(contact_rows)} Contact(s)"
+                        if email_count:
+                            label += f" — {email_count} with email"
+                        st.download_button(
+                            label,
+                            buf.getvalue(),
+                            file_name=f"npi_contacts_{datetime.now().strftime('%Y%m%d')}.csv",
+                            mime="text/csv",
+                            use_container_width=True,
+                        )
+                with exp_col2:
+                    _auth_user = st.session_state.get("_auth_user", {})
+                    if st.button("💾 Save Review", use_container_width=True):
+                        save_npi_review(
+                            query=st.session_state.get("npi_last_query", ""),
+                            overrides=_overrides,
+                            relevance_map=relevance_map,
+                            email_cache=email_cache,
+                            reviewer_email=_auth_user.get("email", "unknown"),
+                        )
+                        st.success("Review saved.")
 
-            email_count = sum(1 for r in contact_rows if r.get("Email"))
-            exp_col1, exp_col2, exp_col3 = st.columns([1, 1, 2])
-            with exp_col1:
-                if contact_rows:
-                    contact_export_df = pd.DataFrame(contact_rows)
-                    buf = io.StringIO()
-                    contact_export_df.to_csv(buf, index=False)
-                    label = f"📧 Export {len(contact_rows)} Contact(s)"
-                    if email_count:
-                        label += f" — {email_count} with email"
-                    st.download_button(
-                        label,
-                        buf.getvalue(),
-                        file_name=f"npi_contacts_{datetime.now().strftime('%Y%m%d')}.csv",
-                        mime="text/csv",
-                        use_container_width=True,
-                    )
-            with exp_col2:
-                _auth_user = st.session_state.get("_auth_user", {})
-                if st.button("💾 Save Review", use_container_width=True):
-                    save_npi_review(
-                        query=st.session_state.get("npi_last_query", ""),
-                        overrides=overrides,
-                        relevance_map=relevance_map,
-                        email_cache=email_cache,
-                        reviewer_email=_auth_user.get("email", "unknown"),
-                    )
-                    st.success("Review saved.")
+            _npi_editor_fragment()
 
         else:
             if len(fdf) != len(df):
