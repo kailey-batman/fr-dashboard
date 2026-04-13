@@ -2096,49 +2096,70 @@ def main():
             </div>"""
             st.html(_table_html)
 
-            # Editable overrides (compact data_editor for Relevance + Email only)
+            # Editable overrides — per-ticket selectbox/text_input (keyed by ticket ID,
+            # not row index, so re-sorting after Save never corrupts state)
             with st.expander("✏️ Edit Relevance & Email", expanded=False):
-                _edit_cols = ["Relevance", id_col_name, title_col_name, "Email"] if title_col_name and title_col_name in fdf.columns else ["Relevance", id_col_name, "Email"]
-                edit_df = fdf[[c for c in _edit_cols if c in fdf.columns]].copy()
-
-                edit_col_config = {
-                    id_col_name: st.column_config.TextColumn("ID", width="small"),
-                    "Relevance": st.column_config.SelectboxColumn(
-                        "✏️ Relevance",
-                        options=["Direct", "Partial", "Related", "Exclude"],
-                        required=True,
-                        width="medium",
-                        help="Click to change relevance — only this column and Email are editable",
-                    ),
-                    "Email": st.column_config.TextColumn("✏️ Email", width="medium"),
+                st.markdown("""
+                <style>
+                .rel-edit-header { color:#9E9E9E; font-size:0.78rem; font-weight:700;
+                                   text-transform:uppercase; padding:0 4px; }
+                div[data-testid="stSelectbox"] > div > div {
+                    border-color: #00E676 !important;
+                    background-color: rgba(0,230,118,0.07) !important;
                 }
-                if title_col_name and title_col_name in edit_df.columns:
-                    edit_col_config[title_col_name] = st.column_config.TextColumn("Ticket", width="large")
+                </style>
+                """, unsafe_allow_html=True)
 
-                edit_disabled = [c for c in edit_df.columns if c not in ("Relevance", "Email")]
+                _rel_options = ["Direct", "Partial", "Related", "Exclude"]
+                _rel_emoji = {"Direct": "🟢", "Partial": "🟡", "Related": "🔴", "Exclude": "⚫"}
+                _rel_format = lambda x: f"{_rel_emoji.get(x, '')} {x}"
 
-                st.data_editor(
-                    edit_df,
-                    use_container_width=True,
-                    height=350,
-                    column_config=edit_col_config,
-                    disabled=edit_disabled,
-                    hide_index=True,
-                    key="npi_editor",
-                )
+                link_col_name = resolve_col("link", fdf)
+                title_col_name_edit = resolve_col("title", fdf)
 
-            # Helper: read current overrides from editor state (no rerun needed)
+                # Header row
+                h1, h2, h3 = st.columns([1.2, 3, 2])
+                h1.markdown('<span class="rel-edit-header">✏️ Relevance</span>', unsafe_allow_html=True)
+                h2.markdown('<span class="rel-edit-header">Ticket</span>', unsafe_allow_html=True)
+                h3.markdown('<span class="rel-edit-header">✏️ Email</span>', unsafe_allow_html=True)
+                st.markdown("<hr style='margin:2px 0 6px 0;border-color:#3a4149;'>", unsafe_allow_html=True)
+
+                for _, row in fdf.iterrows():
+                    tid = str(row.get(id_col_name, ""))
+                    current_rel = _resolve_relevance(tid)
+                    title_val = str(row.get(title_col_name_edit, "")) if title_col_name_edit and title_col_name_edit in row.index else ""
+                    link_val = str(row.get(link_col_name, "")) if link_col_name and link_col_name in row.index else ""
+                    current_email = str(row.get("Email", ""))
+
+                    # Seed session state on first render so Save always has a value to read
+                    if f"edit_rel_{tid}" not in st.session_state:
+                        st.session_state[f"edit_rel_{tid}"] = current_rel
+                    if f"edit_email_{tid}" not in st.session_state:
+                        st.session_state[f"edit_email_{tid}"] = current_email
+
+                    c1, c2, c3 = st.columns([1.2, 3, 2])
+                    with c1:
+                        st.selectbox(
+                            "rel", options=_rel_options,
+                            format_func=_rel_format,
+                            key=f"edit_rel_{tid}",
+                            label_visibility="collapsed",
+                        )
+                    title_html = (
+                        f'<a href="{link_val}" target="_blank" style="color:#E0E0E0;text-decoration:none;font-size:0.88rem;">{title_val}</a>'
+                        if link_val and link_val not in ("", "nan") else
+                        f'<span style="font-size:0.88rem;">{title_val}</span>'
+                    )
+                    c2.markdown(title_html, unsafe_allow_html=True)
+                    with c3:
+                        st.text_input("email", key=f"edit_email_{tid}", label_visibility="collapsed")
+
+            # Helper: read current overrides from per-ticket widget keys
             def _get_current_overrides() -> dict:
                 ov = dict(st.session_state.get("npi_overrides", {}))
-                edited_rows = st.session_state.get("npi_editor", {}).get("edited_rows", {})
-                for row_idx_str, changes in edited_rows.items():
-                    row_idx = int(row_idx_str)
-                    if row_idx >= len(_fdf_tids):
-                        continue
-                    tid = _fdf_tids[row_idx]
-                    current = ov.get(tid, {})
-                    new_rel = changes.get("Relevance", current.get("relevance") or relevance_map.get(tid, "Related"))
-                    new_email = changes.get("Email", current.get("email", ""))
+                for tid in _fdf_tids:
+                    new_rel = st.session_state.get(f"edit_rel_{tid}") or relevance_map.get(tid, "Related")
+                    new_email = st.session_state.get(f"edit_email_{tid}", "")
                     ai_rel = relevance_map.get(tid, "Related")
                     if new_rel != ai_rel or new_email:
                         ov[tid] = {"relevance": new_rel, "email": new_email}
@@ -2199,9 +2220,13 @@ def main():
                         email_cache=email_cache,
                         reviewer_email=_auth_user.get("email", "unknown"),
                     )
-                    # Clear the editor's stale row-index state so the next round
-                    # of edits starts from the freshly sorted fdf, not old indices
-                    st.session_state.pop("npi_editor", None)
+                    # Sync per-ticket widget keys to the saved values so the
+                    # dropdowns reflect the correct state after rerun
+                    for _tid, _data in _save_ov.items():
+                        if _data.get("relevance"):
+                            st.session_state[f"edit_rel_{_tid}"] = _data["relevance"]
+                        if _data.get("email"):
+                            st.session_state[f"edit_email_{_tid}"] = _data["email"]
                     st.rerun()
 
             # ── Draft outreach messages ────────────────────────────
