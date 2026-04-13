@@ -2199,7 +2199,10 @@ def main():
                         email_cache=email_cache,
                         reviewer_email=_auth_user.get("email", "unknown"),
                     )
-                    st.success("Review saved.")
+                    # Clear the editor's stale row-index state so the next round
+                    # of edits starts from the freshly sorted fdf, not old indices
+                    st.session_state.pop("npi_editor", None)
+                    st.rerun()
 
             # ── Draft outreach messages ────────────────────────────
             with st.expander("📝 Draft Outreach Messages", expanded=False):
