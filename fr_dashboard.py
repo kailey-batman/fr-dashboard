@@ -2220,13 +2220,6 @@ def main():
                         email_cache=email_cache,
                         reviewer_email=_auth_user.get("email", "unknown"),
                     )
-                    # Sync per-ticket widget keys to the saved values so the
-                    # dropdowns reflect the correct state after rerun
-                    for _tid, _data in _save_ov.items():
-                        if _data.get("relevance"):
-                            st.session_state[f"edit_rel_{_tid}"] = _data["relevance"]
-                        if _data.get("email"):
-                            st.session_state[f"edit_email_{_tid}"] = _data["email"]
                     st.rerun()
 
             # ── Draft outreach messages ────────────────────────────
