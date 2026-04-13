@@ -785,6 +785,7 @@ def get_anthropic_client():
 # ============================================================
 
 INTERCOM_API_TOKEN = os.environ.get("INTERCOM_API_TOKEN", "")
+INTERCOM_ADMIN_ID = os.environ.get("INTERCOM_ADMIN_ID", "")
 
 
 def _intercom_search_contact(name: str, company: str | None = None) -> dict | None:
@@ -862,6 +863,40 @@ def lookup_emails_for_npi(ticket_ids: list[str], contacts: dict) -> dict:
         if match and match.get("email"):
             results[tid] = match
     return results
+
+
+def _intercom_send_email(to_email: str, contact_name: str, subject: str, body: str) -> tuple[bool, str]:
+    """Send an outbound email via Intercom Messages API. Returns (success, error_message)."""
+    if not INTERCOM_API_TOKEN or not INTERCOM_ADMIN_ID:
+        return False, "INTERCOM_API_TOKEN or INTERCOM_ADMIN_ID is not configured."
+    if not to_email:
+        return False, "No recipient email address."
+    html_body = "<p>" + body.replace("\n", "<br>") + "</p>"
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {INTERCOM_API_TOKEN}",
+        "Intercom-Version": "2.11",
+    }
+    payload = {
+        "message_type": "email",
+        "subject": subject,
+        "body": html_body,
+        "template": "plain",
+        "from": {"type": "admin", "id": INTERCOM_ADMIN_ID},
+        "to": {"type": "contact", "email": to_email},
+    }
+    try:
+        resp = _http.post("https://api.intercom.io/messages", json=payload, headers=headers, timeout=15)
+        resp.raise_for_status()
+        return True, ""
+    except _http.exceptions.HTTPError as exc:
+        try:
+            detail = exc.response.json().get("errors", [{}])[0].get("message", str(exc))
+        except Exception:
+            detail = str(exc)
+        return False, f"Intercom API error: {detail}"
+    except Exception as exc:
+        return False, f"Request failed: {exc}"
 
 
 # ============================================================
@@ -2302,6 +2337,12 @@ No other text."""
                     # Display generated drafts
                     draft_summaries = st.session_state.get("npi_draft_summaries", {})
                     if draft_summaries:
+                        if not INTERCOM_API_TOKEN or not INTERCOM_ADMIN_ID:
+                            st.warning(
+                                "Intercom send is not configured. Set `INTERCOM_API_TOKEN` and "
+                                "`INTERCOM_ADMIN_ID` environment variables in Railway to enable sending.",
+                                icon="⚠️",
+                            )
                         _link_text = f"\n\n[Check it out here]({npi_link})" if npi_link else "\n\nCheck it out here (link pending)."
                         all_drafts = []
                         for dc in _draft_candidates:
@@ -2328,6 +2369,38 @@ No other text."""
                                 key=draft_key,
                                 height=200,
                             )
+
+                            _sent_key = f"npi_sent_{dc['tid']}"
+                            _send_status = st.session_state.get(_sent_key)
+                            _has_email = bool(dc["email"])
+                            _intercom_ready = bool(INTERCOM_API_TOKEN and INTERCOM_ADMIN_ID)
+
+                            if _send_status == "ok":
+                                st.success("✅ Sent via Intercom")
+                            elif _send_status:
+                                st.error(f"🔴 Failed: {_send_status}")
+
+                            _btn_help = None
+                            if not _intercom_ready:
+                                _btn_help = "Intercom is not configured (missing API token or admin ID)."
+                            elif not _has_email:
+                                _btn_help = f"No email address for {dc['name']}. Add one in Edit Relevance & Email above."
+
+                            if st.button(
+                                "📨 Send via Intercom",
+                                key=f"send_btn_{dc['tid']}",
+                                disabled=(not _has_email or not _intercom_ready),
+                                help=_btn_help,
+                            ):
+                                _ok, _err = _intercom_send_email(
+                                    to_email=dc["email"],
+                                    contact_name=dc["name"],
+                                    subject="A feature you requested is now available",
+                                    body=st.session_state.get(draft_key, ""),
+                                )
+                                st.session_state[_sent_key] = "ok" if _ok else _err
+                                st.rerun()
+
                             st.markdown("---")
 
                         # Export all drafts as CSV
