@@ -2243,14 +2243,14 @@ def main():
                                     )
                                 contacts_text = ("\n" + "=" * 40 + "\n").join(contact_lines)
 
-                                draft_prompt = f"""For each contact below, write a one-sentence summary of the feedback they submitted. The summary should be specific to their ticket — not generic. Write from the perspective of someone who read their feature request.
+                                draft_prompt = f"""For each contact below, write a one-sentence summary of the feature request they submitted. The summary should describe the capability or feature being requested — not who asked for it. Do NOT start with the person's name or phrases like "[Name] needs..." or "[Name] wants...". Instead, write something like "the ability to..." or "a way to..." that describes the feature itself.
 
 Contacts and their tickets:
 
 {contacts_text}
 
 Respond with a JSON array — one object per contact, in the same order:
-[{{"id": "<ticket id>", "feedback_summary": "a concise summary of what they asked for"}}]
+[{{"id": "<ticket id>", "feedback_summary": "a concise description of the feature requested"}}]
 No other text."""
 
                                 try:
