@@ -7,6 +7,7 @@ import json
 import os
 import base64
 import threading
+import queue as _queue
 import urllib.parse
 import secrets
 import requests as _http
@@ -1488,10 +1489,17 @@ if "_session_id" not in st.session_state:
     st.session_state["_session_id"] = secrets.token_hex(8)
     st.session_state["_session_start"] = datetime.now()
     st.session_state["_last_heartbeat"] = datetime.now()
-    threading.Thread(
-        target=lambda: st.session_state.update({"_activity_row": _log_session_start(st.session_state["_auth_user"], st.session_state["_session_id"])}),
-        daemon=True,
-    ).start()
+    st.session_state["_activity_row"] = None
+    _log_user = st.session_state["_auth_user"]
+    _log_sid = st.session_state["_session_id"]
+    _row_q = _queue.Queue()
+    def _do_log_session():
+        _row_q.put(_log_session_start(_log_user, _log_sid))
+    _t = threading.Thread(target=_do_log_session, daemon=True)
+    _t.start()
+    _t.join(timeout=5)  # wait up to 5s so we get the row number before heartbeats need it
+    if not _row_q.empty():
+        st.session_state["_activity_row"] = _row_q.get()
 
 # Send heartbeat on each interaction (throttled to once per 55 seconds)
 _hb_now = datetime.now()
