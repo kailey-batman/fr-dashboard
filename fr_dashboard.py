@@ -2086,7 +2086,7 @@ def main():
                 </tbody>
             </table>
             </div>"""
-            st.markdown(_table_html, unsafe_allow_html=True)
+            st.html(_table_html)
 
             # Editable overrides (compact data_editor for Relevance + Email only)
             with st.expander("✏️ Edit Relevance & Email", expanded=False):
