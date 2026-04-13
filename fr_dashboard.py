@@ -2498,6 +2498,23 @@ No other text."""
     # ════════════════════════════════════════════════════════
     if _admin_mode and tab_admin is not None:
         with tab_admin:
+            # ── Credential health check ───────────────────────────
+            _has_sa = bool(
+                os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON")
+                or os.path.exists(os.path.join(_APP_DIR, "service_account.json"))
+            )
+            _has_sheet = SHEET_ID != "YOUR_SHEET_ID_HERE"
+            if not _has_sa or not _has_sheet:
+                missing = []
+                if not _has_sa:
+                    missing.append("`GOOGLE_SERVICE_ACCOUNT_JSON` env var (service account credentials)")
+                if not _has_sheet:
+                    missing.append("`GOOGLE_SHEET_ID` env var")
+                st.error(
+                    "⚠️ Activity logging is not working — missing Railway environment variable(s):\n\n"
+                    + "\n".join(f"- {m}" for m in missing)
+                )
+
             st.subheader("Access Log")
             st.markdown("Every time a user authenticates, their login is recorded here.")
 
