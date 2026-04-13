@@ -2403,6 +2403,28 @@ No other text."""
 
                             st.markdown("---")
 
+                        # Send All button
+                        _intercom_ready = bool(INTERCOM_API_TOKEN and INTERCOM_ADMIN_ID)
+                        _unsent = [d for d in all_drafts if st.session_state.get(f"npi_sent_{d['tid']}") != "ok" and d["email"]]
+                        if _intercom_ready and _unsent:
+                            if st.button(f"📨 Send All ({len(_unsent)} unsent)", use_container_width=True, key="send_all_btn"):
+                                _send_all_errors = []
+                                for d in _unsent:
+                                    _ok, _err = _intercom_send_email(
+                                        to_email=d["email"],
+                                        contact_name=d["name"],
+                                        subject="A feature you requested is now available",
+                                        body=st.session_state.get(f"draft_{d['tid']}", d["draft"]),
+                                    )
+                                    st.session_state[f"npi_sent_{d['tid']}"] = "ok" if _ok else _err
+                                    if not _ok:
+                                        _send_all_errors.append(f"{d['name']}: {_err}")
+                                if _send_all_errors:
+                                    st.error("Some messages failed to send:\n" + "\n".join(_send_all_errors))
+                                else:
+                                    st.success(f"✅ All {len(_unsent)} messages sent via Intercom")
+                                st.rerun()
+
                         # Export all drafts as CSV
                         if all_drafts:
                             drafts_export = []
