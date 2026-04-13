@@ -2090,17 +2090,19 @@ def main():
 
             # Editable overrides (compact data_editor for Relevance + Email only)
             with st.expander("✏️ Edit Relevance & Email", expanded=False):
-                edit_df = fdf[[id_col_name, title_col_name, "Relevance", "Email"]].copy() if title_col_name and title_col_name in fdf.columns else fdf[[id_col_name, "Relevance", "Email"]].copy()
+                _edit_cols = ["Relevance", id_col_name, title_col_name, "Email"] if title_col_name and title_col_name in fdf.columns else ["Relevance", id_col_name, "Email"]
+                edit_df = fdf[[c for c in _edit_cols if c in fdf.columns]].copy()
 
                 edit_col_config = {
                     id_col_name: st.column_config.TextColumn("ID", width="small"),
                     "Relevance": st.column_config.SelectboxColumn(
-                        "Relevance",
+                        "✏️ Relevance",
                         options=["Direct", "Partial", "Related", "Exclude"],
                         required=True,
-                        width="small",
+                        width="medium",
+                        help="Click to change relevance — only this column and Email are editable",
                     ),
-                    "Email": st.column_config.TextColumn("Email", width="medium"),
+                    "Email": st.column_config.TextColumn("✏️ Email", width="medium"),
                 }
                 if title_col_name and title_col_name in edit_df.columns:
                     edit_col_config[title_col_name] = st.column_config.TextColumn("Ticket", width="large")
@@ -2212,7 +2214,7 @@ def main():
                     name = c.get("name") or ""
                     if not name:
                         continue
-                    first_name = name.split()[0] if name else ""
+                    first_name = name.split()[0].capitalize() if name else ""
                     email = _draft_ov.get(tid, {}).get("email") or _resolve_email(row)
                     title = _get(row, "title")
                     description = str(row.get(desc_col, ""))[:500] if desc_col and desc_col in row.index else ""
@@ -2275,7 +2277,7 @@ No other text."""
                         all_drafts = []
                         for dc in _draft_candidates:
                             summary = draft_summaries.get(dc["tid"], "your recent product feedback")
-                            draft = (
+                            generated_draft = (
                                 f"{dc['first_name']},\n\n"
                                 f"Thank you for submitting product feedback regarding {summary}. "
                                 f"We value your input and wanted to notify you that our team has built out "
@@ -2285,15 +2287,17 @@ No other text."""
                                 f"you'd like to see.\n\n"
                                 f"Cheers,\nThe Fieldguide Team"
                             )
-                            all_drafts.append({"name": dc["name"], "email": dc["email"], "draft": draft, "tid": dc["tid"]})
+                            draft_key = f"draft_{dc['tid']}"
+                            # Only seed session state if not yet set, so user edits survive rerenders
+                            if draft_key not in st.session_state:
+                                st.session_state[draft_key] = generated_draft
+                            all_drafts.append({"name": dc["name"], "email": dc["email"], "draft": generated_draft, "tid": dc["tid"]})
 
                             st.markdown(f"**To:** {dc['name']}" + (f" ({dc['email']})" if dc['email'] else " _(no email)_"))
                             st.text_area(
-                                f"Draft for {dc['name']}",
-                                value=draft,
+                                "✏️ Edit draft",
+                                key=draft_key,
                                 height=200,
-                                key=f"draft_{dc['tid']}",
-                                label_visibility="collapsed",
                             )
                             st.markdown("---")
 
