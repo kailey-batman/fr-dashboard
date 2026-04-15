@@ -121,6 +121,125 @@ COLUMNS = {
 # Exact value in the "type" column for feature requests.
 FEATURE_REQUEST_TYPE = "feature"
 
+# ── Canonical product taxonomy mapping ───────────────────────
+# Maps substrings of Shortcut's product_area values (lowercase) to
+# (pillar, sub_group) from the RFC canonical taxonomy.
+# Entries are tried longest-first so "trial balance" matches before "balance".
+_AREA_TO_CANONICAL: dict[str, tuple[str, str]] = {
+    # Core Product — Core Experience
+    "microsoft office":          ("Core Product",     "Core Experience"),
+    "office add-in":             ("Core Product",     "Core Experience"),
+    "inbox & notifications":     ("Core Product",     "Core Experience"),
+    "inbox":                     ("Core Product",     "Core Experience"),
+    "notifications":             ("Core Product",     "Core Experience"),
+    "questionnaires":            ("Core Product",     "Core Experience"),
+    "questionnaire":             ("Core Product",     "Core Experience"),
+    "engagements":               ("Core Product",     "Core Experience"),
+    "engagement":                ("Core Product",     "Core Experience"),
+    "frameworks":                ("Core Product",     "Core Experience"),
+    "framework":                 ("Core Product",     "Core Experience"),
+    "templates":                 ("Core Product",     "Core Experience"),
+    "template":                  ("Core Product",     "Core Experience"),
+    "milestones":                ("Core Product",     "Core Experience"),
+    "milestone":                 ("Core Product",     "Core Experience"),
+    "reporting":                 ("Core Product",     "Core Experience"),
+    "sampling":                  ("Core Product",     "Core Experience"),
+    "insights":                  ("Core Product",     "Core Experience"),
+    "documents":                 ("Core Product",     "Core Experience"),
+    "document":                  ("Core Product",     "Core Experience"),
+    "controls":                  ("Core Product",     "Core Experience"),
+    "control":                   ("Core Product",     "Core Experience"),
+    "comments":                  ("Core Product",     "Core Experience"),
+    "comment":                   ("Core Product",     "Core Experience"),
+    "requests":                  ("Core Product",     "Core Experience"),
+    "request":                   ("Core Product",     "Core Experience"),
+    "sheets":                    ("Core Product",     "Core Experience"),
+    "sheet":                     ("Core Product",     "Core Experience"),
+    "tasks":                     ("Core Product",     "Core Experience"),
+    "task":                      ("Core Product",     "Core Experience"),
+    "forms":                     ("Core Product",     "Core Experience"),
+    "form":                      ("Core Product",     "Core Experience"),
+    # Core Product — Integrations & APIs
+    "data connector":            ("Core Product",     "Integrations & APIs"),
+    "public api":                ("Core Product",     "Integrations & APIs"),
+    "integrations":              ("Core Product",     "Integrations & APIs"),
+    "integration":               ("Core Product",     "Integrations & APIs"),
+    # Core Product — Internal Audit
+    "internal audit":            ("Core Product",     "Internal Audit"),
+    # Core Product — Methodology
+    "methodology":               ("Core Product",     "Methodology"),
+    # Financial Audit — Audit Execution
+    "dynamic scoping":           ("Financial Audit",  "Audit Execution"),
+    "workflows":                 ("Financial Audit",  "Audit Execution"),
+    "workflow":                  ("Financial Audit",  "Audit Execution"),
+    # Financial Audit — Trial Balance & Consolidations
+    "consolidated trial":        ("Financial Audit",  "Trial Balance & Consolidations"),
+    "financial accounts":        ("Financial Audit",  "Trial Balance & Consolidations"),
+    "trial balance":             ("Financial Audit",  "Trial Balance & Consolidations"),
+    # Financial Audit — Financial Statements
+    "financial statements":      ("Financial Audit",  "Financial Statements"),
+    "financial statement":       ("Financial Audit",  "Financial Statements"),
+    "linked account":            ("Financial Audit",  "Financial Statements"),
+    # Financial Audit — catch-all
+    "financial audit":           ("Financial Audit",  "Audit Execution"),
+    # AI — User-Facing AI Features
+    "ai for financial":          ("AI",               "User-Facing AI Features"),
+    "ai annotations":            ("AI",               "User-Facing AI Features"),
+    "ai agents":                 ("AI",               "User-Facing AI Features"),
+    "ai agent":                  ("AI",               "User-Facing AI Features"),
+    "ai chat":                   ("AI",               "User-Facing AI Features"),
+    # AI — AI Infrastructure
+    "document processing":       ("AI",               "AI Infrastructure"),
+    "ai foundations":            ("AI",               "AI Infrastructure"),
+    "vertical models":           ("AI",               "AI Infrastructure"),
+    "evals":                     ("AI",               "AI Infrastructure"),
+    # App Platform — Identity & Access
+    "authentication":            ("App Platform",     "Identity & Access"),
+    "roles & permissions":       ("App Platform",     "Identity & Access"),
+    "roles and permissions":     ("App Platform",     "Identity & Access"),
+    "permissions":               ("App Platform",     "Identity & Access"),
+    "companies":                 ("App Platform",     "Identity & Access"),
+    "company":                   ("App Platform",     "Identity & Access"),
+    "users":                     ("App Platform",     "Identity & Access"),
+    "admin":                     ("App Platform",     "Identity & Access"),
+    "sso":                       ("App Platform",     "Identity & Access"),
+    # App Platform — Infrastructure & Security
+    "networking & security":     ("App Platform",     "Infrastructure & Security"),
+    "networking and security":   ("App Platform",     "Infrastructure & Security"),
+    "networking":                ("App Platform",     "Infrastructure & Security"),
+    "observability":             ("App Platform",     "Infrastructure & Security"),
+    "feature flags":             ("App Platform",     "Infrastructure & Security"),
+    "infrastructure":            ("App Platform",     "Infrastructure & Security"),
+    "fedramp":                   ("App Platform",     "Infrastructure & Security"),
+    "security":                  ("App Platform",     "Infrastructure & Security"),
+}
+# Sort keys by length descending so longer/more-specific keys match first
+_AREA_LOOKUP_ORDER: list[str] = sorted(_AREA_TO_CANONICAL, key=len, reverse=True)
+
+
+def _classify_area(area: str) -> tuple[str, str]:
+    """Map a Shortcut product_area value to (pillar, sub_group). Returns ('', '') if unknown."""
+    if not area or str(area).strip() in ("", "nan", "None"):
+        return "", ""
+    a = str(area).lower().strip()
+    for key in _AREA_LOOKUP_ORDER:
+        if a.startswith(key) or key in a:
+            return _AREA_TO_CANONICAL[key]
+    return "", ""
+
+
+def _enrich_canonical_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Derive 'pillar' and 'sub_group' columns from the product_area column."""
+    area_col = COLUMNS.get("product_area", "product_area")
+    if area_col not in df.columns:
+        df["pillar"] = ""
+        df["sub_group"] = ""
+        return df
+    pillars, sub_groups = zip(*df[area_col].apply(_classify_area)) if len(df) > 0 else ([], [])
+    df["pillar"] = list(pillars)
+    df["sub_group"] = list(sub_groups)
+    return df
+
 # Email domain for internal team members — tickets submitted by this domain
 # with no customer keywords in the description are pre-filtered as internal.
 INTERNAL_DOMAIN = "fieldguide.io"
@@ -755,6 +874,9 @@ def load_feature_requests() -> pd.DataFrame:
 
         # Fill product_area / priority / severity from custom_fields if empty
         df = _fill_from_custom_fields(df)
+
+        # Derive canonical pillar and sub_group from product_area
+        df = _enrich_canonical_columns(df)
 
         return df.reset_index(drop=True)
 
@@ -1938,6 +2060,20 @@ def main():
                 else:
                     status_filter = "All"
 
+            fp1, fp2 = st.columns(2)
+            with fp1:
+                pillars_available = sorted(df["pillar"].replace("", pd.NA).dropna().unique().tolist()) if "pillar" in df.columns else []
+                pillar_filter = st.selectbox("Pillar", ["All"] + pillars_available)
+            with fp2:
+                if "sub_group" in df.columns and pillar_filter != "All":
+                    sgs_available = sorted(
+                        df.loc[df["pillar"] == pillar_filter, "sub_group"]
+                        .replace("", pd.NA).dropna().unique().tolist()
+                    )
+                else:
+                    sgs_available = sorted(df["sub_group"].replace("", pd.NA).dropna().unique().tolist()) if "sub_group" in df.columns else []
+                sub_group_filter = st.selectbox("Sub-Group", ["All"] + sgs_available)
+
         # Apply filters
         fdf = df.copy()
         title_col = resolve_col("title", fdf)
@@ -1956,6 +2092,10 @@ def main():
             fdf = fdf[fdf[priority_col].astype(str) == priority_filter]
         if status_filter != "All" and status_col:
             fdf = fdf[fdf[status_col].astype(str) == status_filter]
+        if pillar_filter != "All" and "pillar" in fdf.columns:
+            fdf = fdf[fdf["pillar"] == pillar_filter]
+        if sub_group_filter != "All" and "sub_group" in fdf.columns:
+            fdf = fdf[fdf["sub_group"] == sub_group_filter]
 
         # Apply NPI filter if active
         npi_results = st.session_state.get("npi_results")
@@ -2059,13 +2199,13 @@ def main():
             excluded_n = (fdf["Relevance"] == "Exclude").sum()
             counts_parts = [f"{direct_n} Direct", f"{partial_n} Partial", f"{related_n} Related"]
             if excluded_n:
-                counts_parts.append(f"{excluded_n} Excluded")
+                counts_parts.append(f"{excluded_n} Non-Related")
             st.caption(f"NPI matched {len(fdf):,} tickets — " + " · ".join(counts_parts))
 
             st.markdown(
                 '<span style="font-size:0.8rem;color:#9E9E9E;">'
                 '🟢 Direct = Contact &nbsp;|&nbsp; 🟡 Partial = Review needed &nbsp;|&nbsp; '
-                '🔴 Related = Low priority &nbsp;|&nbsp; ⚫ Exclude = Skip'
+                '🔴 Related = Low priority &nbsp;|&nbsp; ⚫ Non-Related = Skip (excluded from drafts)'
                 '</span>', unsafe_allow_html=True,
             )
 
@@ -2147,7 +2287,8 @@ def main():
 
                 _rel_options = ["Direct", "Partial", "Related", "Exclude"]
                 _rel_emoji = {"Direct": "🟢", "Partial": "🟡", "Related": "🔴", "Exclude": "⚫"}
-                _rel_format = lambda x: f"{_rel_emoji.get(x, '')} {x}"
+                _rel_label = {"Direct": "Direct", "Partial": "Partial", "Related": "Related", "Exclude": "Non-Related"}
+                _rel_format = lambda x: f"{_rel_emoji.get(x, '')} {_rel_label.get(x, x)}"
 
                 link_col_name = resolve_col("link", fdf)
                 title_col_name_edit = resolve_col("title", fdf)
@@ -2248,6 +2389,7 @@ def main():
                 if st.button("💾 Save Review", use_container_width=True):
                     _save_ov = _get_current_overrides()
                     st.session_state["npi_overrides"] = _save_ov
+                    st.session_state["npi_show_drafts"] = True
                     save_npi_review(
                         query=st.session_state.get("npi_last_query", ""),
                         overrides=_save_ov,
@@ -2258,7 +2400,10 @@ def main():
                     st.rerun()
 
             # ── Draft outreach messages ────────────────────────────
-            with st.expander("📝 Draft Outreach Messages", expanded=False):
+            _drafts_expanded = st.session_state.get("npi_show_drafts", False)
+            if _drafts_expanded:
+                st.session_state["npi_show_drafts"] = False  # consume the flag
+            with st.expander("📝 Draft Outreach Messages", expanded=_drafts_expanded):
                 npi_link = st.text_input(
                     "NPI Announcement Link",
                     placeholder="https://fieldguide.com/changelog/...",
@@ -2291,9 +2436,22 @@ def main():
                 if not _draft_candidates:
                     st.info("No Direct or Partial contacts with names to draft messages for. Change ticket relevance above to include them.")
                 else:
-                    st.caption(f"{len(_draft_candidates)} contacts to message")
+                    _excluded_count = sum(
+                        1 for _, row in fdf.iterrows()
+                        if (_draft_ov.get(str(row.get(id_col_name, "")), {}).get("relevance") or relevance_map.get(str(row.get(id_col_name, "")), "Related")) == "Exclude"
+                    )
+                    _caption = f"{len(_draft_candidates)} contacts to message"
+                    if _excluded_count:
+                        _caption += f" · {_excluded_count} Non-Related excluded"
+                    st.caption(_caption)
 
-                    if st.button("✨ Generate Drafts", use_container_width=True, key="gen_drafts"):
+                    # Auto-generate drafts after Save Review if not yet generated
+                    _auto_generate = (
+                        st.session_state.get("npi_show_drafts", False)
+                        and not st.session_state.get("npi_draft_summaries")
+                    )
+
+                    if st.button("✨ Generate Drafts", use_container_width=True, key="gen_drafts") or _auto_generate:
                         ai = get_anthropic_client()
                         if ai is None:
                             st.error("ANTHROPIC_API_KEY is not configured.")
@@ -2526,21 +2684,45 @@ No other text."""
         cc1, cc2 = st.columns(2)
 
         with cc1:
-            if area_col and area_col in df.columns:
-                st.subheader("By Product Area")
-                area_counts = df[area_col].astype(str).value_counts().reset_index()
-                area_counts.columns = ["Product Area", "Count"]
-                st.bar_chart(area_counts.set_index("Product Area"))
+            if "pillar" in fdf.columns:
+                st.subheader("By Pillar")
+                pillar_counts = (
+                    fdf["pillar"].replace("", pd.NA).dropna()
+                    .value_counts().reset_index()
+                )
+                pillar_counts.columns = ["Pillar", "Count"]
+                if not pillar_counts.empty:
+                    st.bar_chart(pillar_counts.set_index("Pillar"))
 
         with cc2:
-            ts_col = resolve_col("timestamp", df)
+            ts_col = resolve_col("timestamp", fdf)
             if ts_col:
                 st.subheader("Submissions Over Time")
-                df_t = df[[ts_col]].dropna().copy()
+                df_t = fdf[[ts_col]].dropna().copy()
                 df_t["month"] = df_t[ts_col].dt.to_period("M").astype(str)
                 monthly = df_t["month"].value_counts().sort_index().reset_index()
                 monthly.columns = ["Month", "Count"]
                 st.bar_chart(monthly.set_index("Month"))
+
+        cc3, cc4 = st.columns(2)
+
+        with cc3:
+            if "sub_group" in fdf.columns:
+                st.subheader("By Sub-Group")
+                sg_counts = (
+                    fdf["sub_group"].replace("", pd.NA).dropna()
+                    .value_counts().reset_index()
+                )
+                sg_counts.columns = ["Sub-Group", "Count"]
+                if not sg_counts.empty:
+                    st.bar_chart(sg_counts.set_index("Sub-Group"))
+
+        with cc4:
+            if area_col and area_col in fdf.columns:
+                st.subheader("By Product Area")
+                area_counts = fdf[area_col].astype(str).value_counts().reset_index()
+                area_counts.columns = ["Product Area", "Count"]
+                st.bar_chart(area_counts.set_index("Product Area"))
 
         # ── Downloads ─────────────────────────────────────────
         st.markdown("---")
