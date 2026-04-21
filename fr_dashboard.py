@@ -1849,11 +1849,11 @@ def main():
     # ── Tabs ─────────────────────────────────────────────────
     _admin_mode = _is_admin()
     if _admin_mode:
-        tab1, tab3, tab_admin = st.tabs(
-            ["📋 Feature Requests", "📊 Google Sheet", "Admin"]
+        tab1, tab_voc, tab3, tab_admin = st.tabs(
+            ["📋 Feature Requests", "🗣️ Voice of the Customer", "📊 Google Sheet", "Admin"]
         )
     else:
-        tab1, tab3 = st.tabs(["📋 Feature Requests", "📊 Google Sheet"])
+        tab1, tab_voc, tab3 = st.tabs(["📋 Feature Requests", "🗣️ Voice of the Customer", "📊 Google Sheet"])
         tab_admin = None
 
     # ════════════════════════════════════════════════════════
@@ -2747,6 +2747,284 @@ No other text."""
                 file_name=f"fr_all_{datetime.now().strftime('%Y%m%d')}.csv",
                 mime="text/csv",
                 use_container_width=True,
+            )
+
+    # ════════════════════════════════════════════════════════
+    # TAB VOC — VOICE OF THE CUSTOMER
+    # ════════════════════════════════════════════════════════
+    with tab_voc:
+        st.markdown("### 🗣️ Voice of the Customer")
+        st.markdown(
+            '<div style="color:#9E9E9E;font-size:0.9rem;margin-bottom:16px;">'
+            "AI-generated summary of the top 5 themes customers are asking for, based on customer-facing feature requests."
+            "</div>",
+            unsafe_allow_html=True,
+        )
+
+        # ── Date range picker ────────────────────────────────
+        today = datetime.now().date()
+
+        def _quarter_bounds(d):
+            q_start_month = ((d.month - 1) // 3) * 3 + 1
+            from datetime import date as _date
+            return _date(d.year, q_start_month, 1)
+
+        preset_options = [
+            "Last 4 weeks",
+            "Last 12 weeks",
+            "This quarter",
+            "Last quarter",
+            "Last 6 months",
+            "Custom",
+        ]
+
+        voc_col1, voc_col2 = st.columns([2, 3])
+        with voc_col1:
+            voc_preset = st.selectbox("Time period", preset_options, index=1, key="voc_preset")
+
+        if voc_preset == "Last 4 weeks":
+            voc_start = today - timedelta(weeks=4)
+            voc_end = today
+        elif voc_preset == "Last 12 weeks":
+            voc_start = today - timedelta(weeks=12)
+            voc_end = today
+        elif voc_preset == "This quarter":
+            voc_start = _quarter_bounds(today)
+            voc_end = today
+        elif voc_preset == "Last quarter":
+            this_q = _quarter_bounds(today)
+            last_q_end = this_q - timedelta(days=1)
+            voc_start = _quarter_bounds(last_q_end)
+            voc_end = last_q_end
+        elif voc_preset == "Last 6 months":
+            voc_start = today - timedelta(days=180)
+            voc_end = today
+        else:
+            with voc_col2:
+                custom_range = st.date_input(
+                    "Custom range",
+                    value=(today - timedelta(weeks=12), today),
+                    key="voc_custom_range",
+                )
+            if isinstance(custom_range, (list, tuple)) and len(custom_range) == 2:
+                voc_start, voc_end = custom_range
+            else:
+                voc_start = voc_end = today
+
+        st.markdown(
+            f'<div style="color:#9E9E9E;font-size:0.82rem;margin-bottom:16px;">'
+            f"Analyzing tickets from <b>{voc_start.strftime('%b %d, %Y')}</b> to <b>{voc_end.strftime('%b %d, %Y')}</b>"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+
+        # ── Filter tickets to date range + customer-only ─────
+        ts_col = COLUMNS.get("timestamp", "created_at")
+        id_col = COLUMNS.get("id", "id")
+
+        voc_df = df.copy()
+        if ts_col in voc_df.columns:
+            voc_df[ts_col] = pd.to_datetime(voc_df[ts_col], errors="coerce")
+            voc_df = voc_df[
+                (voc_df[ts_col].dt.date >= voc_start) &
+                (voc_df[ts_col].dt.date <= voc_end)
+            ]
+
+        # Customer-only filter using contact analysis
+        def _voc_is_customer(row):
+            tid = str(row.get(id_col, ""))
+            c = contacts.get(tid, {})
+            if not isinstance(c, dict):
+                return True  # not yet analyzed — include conservatively
+            return c.get("is_customer_ticket") is not False
+
+        voc_df = voc_df[voc_df.apply(_voc_is_customer, axis=1)]
+
+        # ── Advisory / Audit split ────────────────────────────
+        # TODO: replace pillar-based split with the correct Shortcut field once identified.
+        # Currently: "Financial Audit" pillar = Audit, everything else = Advisory.
+        AUDIT_PILLARS = {"Financial Audit"}
+
+        def _voc_segment(row):
+            return "Audit" if row.get("pillar", "") in AUDIT_PILLARS else "Advisory"
+
+        voc_df["_voc_segment"] = voc_df.apply(_voc_segment, axis=1)
+
+        advisory_df = voc_df[voc_df["_voc_segment"] == "Advisory"]
+        audit_df = voc_df[voc_df["_voc_segment"] == "Audit"]
+
+        advisory_count = len(advisory_df)
+        audit_count = len(audit_df)
+
+        st.markdown(
+            f'<div style="color:#9E9E9E;font-size:0.85rem;margin-bottom:20px;">'
+            f"<b style='color:#E0E0E0;'>{advisory_count}</b> Advisory tickets &nbsp;·&nbsp; "
+            f"<b style='color:#E0E0E0;'>{audit_count}</b> Audit tickets in this window"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+
+        # ── Generate button ───────────────────────────────────
+        voc_cache_key = f"voc_result_{voc_start}_{voc_end}"
+
+        if st.button("✨ Generate Voice of the Customer", type="primary", key="voc_generate"):
+            st.session_state.pop(voc_cache_key, None)  # force refresh
+
+        def _build_ticket_list(segment_df: pd.DataFrame) -> list[dict]:
+            rows = []
+            area_col = COLUMNS.get("product_area", "product_area")
+            for _, row in segment_df.iterrows():
+                tid = str(row.get(id_col, ""))
+                summary = summaries.get(tid, "").strip()
+                if not summary:
+                    continue
+                rows.append({
+                    "id": tid,
+                    "product_area": str(row.get(area_col, "")),
+                    "summary": summary,
+                })
+            return rows
+
+        def _run_voc_synthesis(segment_label: str, ticket_rows: list[dict]) -> dict | None:
+            if not ticket_rows:
+                return None
+            if not ai:
+                return None
+
+            ticket_list_str = "\n".join(
+                f"- [{r['id']}] ({r['product_area']}) {r['summary']}"
+                for r in ticket_rows
+            )
+            prompt = f"""You are analyzing customer feature request tickets submitted to Fieldguide.
+
+Segment: {segment_label}
+Ticket count: {len(ticket_rows)}
+Time window: {voc_start} to {voc_end}
+
+Tickets (id | product_area | summary):
+{ticket_list_str}
+
+Task:
+1. Identify the top 5 product themes customers are asking for most, ranked by frequency and signal strength. Only include a theme if at least 3 tickets contribute to it. If fewer than 5 themes meet this threshold, return only the ones that do.
+2. For each theme: a short name (3-5 words), a 1-2 sentence synthesis of what customers want and why, the count of tickets contributing, and 1-2 representative ticket IDs.
+3. Write a 2-3 sentence executive summary of overall customer sentiment for this segment.
+
+Respond with valid JSON only, no markdown fences:
+{{
+  "executive_summary": "...",
+  "themes": [
+    {{"rank": 1, "name": "...", "synthesis": "...", "ticket_count": 0, "example_ids": ["SC-123"]}},
+    {{"rank": 2, "name": "...", "synthesis": "...", "ticket_count": 0, "example_ids": ["SC-456"]}},
+    {{"rank": 3, "name": "...", "synthesis": "...", "ticket_count": 0, "example_ids": []}},
+    {{"rank": 4, "name": "...", "synthesis": "...", "ticket_count": 0, "example_ids": []}},
+    {{"rank": 5, "name": "...", "synthesis": "...", "ticket_count": 0, "example_ids": []}}
+  ]
+}}"""
+
+            try:
+                resp = ai.messages.create(
+                    model="claude-haiku-4-5-20251001",
+                    max_tokens=1500,
+                    messages=[{"role": "user", "content": prompt}],
+                )
+                raw = resp.content[0].text.strip()
+                return json.loads(raw)
+            except Exception as e:
+                return {"error": str(e)}
+
+        # ── Render results ────────────────────────────────────
+        def _render_voc_segment(segment_label: str, segment_df: pd.DataFrame):
+            ticket_rows = _build_ticket_list(segment_df)
+            summarized_count = len(ticket_rows)
+            total_count = len(segment_df)
+
+            seg_key = f"{voc_cache_key}_{segment_label}"
+
+            if seg_key not in st.session_state:
+                if total_count == 0:
+                    st.info(f"No customer tickets found for {segment_label} in this date range.")
+                    return
+                if summarized_count < 3:
+                    st.warning(
+                        f"Only {summarized_count} summarized tickets found for {segment_label} — "
+                        "not enough signal to generate themes. Try a wider date range."
+                    )
+                    return
+
+                with st.spinner(f"Analyzing {summarized_count} {segment_label} tickets..."):
+                    result = _run_voc_synthesis(segment_label, ticket_rows)
+                st.session_state[seg_key] = result
+            else:
+                result = st.session_state[seg_key]
+
+            if result is None:
+                st.error("Could not generate summary — Anthropic client not available.")
+                return
+            if "error" in result:
+                st.error(f"Error generating summary: {result['error']}")
+                return
+
+            # Executive summary
+            exec_summary = result.get("executive_summary", "")
+            if exec_summary:
+                st.markdown(
+                    f'<div style="background-color:#1A2F1A;border:1px solid #00E676;border-radius:8px;'
+                    f'padding:14px 18px;margin-bottom:20px;color:#E0E0E0;font-size:0.95rem;">'
+                    f'<span style="color:#00E676;font-weight:700;font-size:0.8rem;letter-spacing:0.05em;">EXECUTIVE SUMMARY</span>'
+                    f'<br><br>{exec_summary}</div>',
+                    unsafe_allow_html=True,
+                )
+
+            # Theme cards
+            themes = result.get("themes", [])
+            for theme in themes:
+                rank = theme.get("rank", "")
+                name = theme.get("name", "")
+                synthesis = theme.get("synthesis", "")
+                ticket_count = theme.get("ticket_count", "")
+                example_ids = theme.get("example_ids", [])
+                ids_html = ""
+                if example_ids:
+                    ids_html = (
+                        '<div style="margin-top:6px;font-size:0.78rem;color:#9E9E9E;">'
+                        + "  ".join(f'<span style="background:#444C56;padding:2px 7px;border-radius:4px;">{eid}</span>' for eid in example_ids)
+                        + "</div>"
+                    )
+                st.markdown(
+                    f'<div style="background-color:#373E47;border:1px solid #444C56;border-radius:8px;'
+                    f'padding:14px 18px;margin-bottom:10px;">'
+                    f'<div style="display:flex;align-items:baseline;gap:10px;margin-bottom:6px;">'
+                    f'<span style="color:#00E676;font-weight:700;font-size:1rem;">#{rank}</span>'
+                    f'<span style="color:#E0E0E0;font-weight:600;font-size:0.95rem;">{name}</span>'
+                    f'<span style="color:#9E9E9E;font-size:0.8rem;margin-left:auto;">{ticket_count} tickets</span>'
+                    f"</div>"
+                    f'<div style="color:#C0C0C0;font-size:0.88rem;">{synthesis}</div>'
+                    f"{ids_html}"
+                    f"</div>",
+                    unsafe_allow_html=True,
+                )
+
+            st.markdown(
+                f'<div style="color:#9E9E9E;font-size:0.78rem;margin-top:4px;">'
+                f"Based on {summarized_count} of {total_count} tickets with AI summaries"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+
+        if voc_cache_key in st.session_state or st.session_state.get("voc_generate"):
+            seg_col1, seg_col2 = st.columns(2)
+            with seg_col1:
+                st.markdown("#### Advisory")
+                _render_voc_segment("Advisory", advisory_df)
+            with seg_col2:
+                st.markdown("#### Audit")
+                _render_voc_segment("Audit", audit_df)
+        else:
+            st.markdown(
+                '<div style="color:#9E9E9E;font-size:0.9rem;margin-top:8px;">'
+                "Select a time period above and click <b>Generate</b> to synthesize customer themes."
+                "</div>",
+                unsafe_allow_html=True,
             )
 
     # ════════════════════════════════════════════════════════
